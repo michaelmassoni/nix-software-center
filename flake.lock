@@ -2,24 +2,20 @@
   "nodes": {
     "nixos-appstream-data": {
       "inputs": {
-        "flake-utils": [
-          "utils"
-        ],
         "nixpkgs": [
           "nixpkgs"
         ]
       },
       "locked": {
-        "lastModified": 1712858390,
-        "narHash": "sha256-XE7gr+zU3N4SHPAhsgk8cVAFp1iBg+Lxxp3y4dUF1vE=",
-        "owner": "korfuri",
+        "lastModified": 1771522738,
+        "narHash": "sha256-uXNpJv687gJMITVYsfuGOywoElKxEcZMRd6HYVHFu24=",
+        "owner": "snowfallorg",
         "repo": "nixos-appstream-data",
-        "rev": "0465d42a4433faa63b7a5eb0b8d397937c9fc13a",
+        "rev": "df1a03d7d838026f3c70ca18b1d8867f605ed51c",
         "type": "github"
       },
       "original": {
-        "owner": "korfuri",
-        "ref": "flake",
+        "owner": "snowfallorg",
         "repo": "nixos-appstream-data",
         "type": "github"
       }

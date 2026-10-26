@@ -17,6 +17,12 @@ A graphical app store for Nix built with [libadwaita](https://gitlab.gnome.org/G
 
 </div>
 
+# About this fork
+A maintained fork of [snowfallorg/nix-software-center](https://github.com/snowfallorg/nix-software-center), whose package list stopped updating in 2025.
+
+- The package list is built from the `packages.json` that channels.nixos.org publishes for your channel, so it always matches current nixpkgs.
+- App icons, screenshots and descriptions come from [snowfallorg/nixos-appstream-data](https://github.com/snowfallorg/nixos-appstream-data). Apps it doesn't cover fall back to an icon from your icon theme.
+
 # Features
 - Install packages to `configuration.nix`
   - Flakes support can be enabled in the preferences menu
@@ -31,7 +37,7 @@ A graphical app store for Nix built with [libadwaita](https://gitlab.gnome.org/G
 {
   inputs = {
     # other inputs
-    nix-software-center.url = "github:snowfallorg/nix-software-center";
+    nix-software-center.url = "github:michaelmassoni/nix-software-center";
 # rest of flake.nix
 ```
 
@@ -72,24 +78,24 @@ For any other method of installation, when rebuilding you might be prompted to a
 
 ## 'nix profile' installation
 ```bash
-nix profile install github:snowfallorg/nix-software-center
+nix profile install github:michaelmassoni/nix-software-center
 ```
 
 ## 'nix-env' Installation
 
 ```bash
-git clone https://github.com/snowfallorg/nix-software-center
+git clone https://github.com/michaelmassoni/nix-software-center
 nix-env -f nix-software-center -i nix-software-center
 ```
 
 ## Single run on an flakes enabled system:
 ```bash
-nix run github:snowfallorg/nix-software-center
+nix run github:michaelmassoni/nix-software-center
 ```
 
 ## Single run on non-flakes enabled system:
 ```bash
-nix --extra-experimental-features "nix-command flakes" run github:snowfallorg/nix-software-center
+nix --extra-experimental-features "nix-command flakes" run github:michaelmassoni/nix-software-center
 ```
 
 ## Debugging

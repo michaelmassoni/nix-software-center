@@ -262,7 +262,8 @@ impl Component for PkgModel {
                                 gtk::Image {
                                     add_css_class: "icon-dropshadow",
                                     set_halign: gtk::Align::Start,
-                                    set_icon_name: Some("package-x-generic"),
+                                    #[watch]
+                                    set_icon_name: Some(&super::themeicon(&model.pkg, &model.pname)),
                                     set_pixel_size: 128,
                                 }
                             },

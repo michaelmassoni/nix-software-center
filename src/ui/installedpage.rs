@@ -269,7 +269,7 @@ impl FactoryComponent for InstalledItemModel {
                         gtk::Image {
                             add_css_class: "icon-dropshadow",
                             set_halign: gtk::Align::Start,
-                            set_icon_name: Some("package-x-generic"),
+                            set_icon_name: Some(&super::themeicon(self.item.pkg.as_deref().unwrap_or_default(), &self.item.pname)),
                             set_pixel_size: 64,
                         }
                     }

@@ -205,7 +205,7 @@ impl FactoryComponent for UnavailableItemModel {
                         gtk::Image {
                             add_css_class: "icon-dropshadow",
                             set_halign: gtk::Align::Start,
-                            set_icon_name: Some("package-x-generic"),
+                            set_icon_name: Some(&super::themeicon(&self.pkg, &self.pname)),
                             set_pixel_size: 64,
                         }
                     }
