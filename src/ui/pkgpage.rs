@@ -2,7 +2,7 @@ use adw::gio;
 use adw::prelude::*;
 use html2pango;
 use image::{imageops::FilterType, ImageFormat};
-use nix_data::config::configfile::NixDataConfig;
+use nix_data::config::configfile::{DefaultInstall, NixDataConfig};
 use relm4::actions::RelmAction;
 use relm4::actions::RelmActionGroup;
 use relm4::gtk::pango;
@@ -1148,7 +1148,11 @@ impl Component for PkgModel {
                 self.set_installeduserpkgs(pkgmodel.installeduserpkgs);
                 self.set_installedsystempkgs(pkgmodel.installedsystempkgs);
 
-                if self.installedsystempkgs.contains(&self.pkg) && !self.installeduserpkgs.contains(match self.userpkgtype { UserPkgs::Env => &self.pname, UserPkgs::Profile => &self.pkg }) {
+                // Installed packages open on where they're installed, others on the default from Preferences
+                let userinstalled = self.installeduserpkgs.contains(match self.userpkgtype { UserPkgs::Env => &self.pname, UserPkgs::Profile => &self.pkg });
+                let systeminstalled = self.installedsystempkgs.contains(&self.pkg);
+                let systemdefault = self.config.defaultinstall == Some(DefaultInstall::System) && self.syspkgtype != SystemPkgs::None;
+                if systeminstalled && !userinstalled || !userinstalled && !systeminstalled && systemdefault {
                     self.set_installtype(InstallType::System)
                 } else {
                     self.set_installtype(InstallType::User)

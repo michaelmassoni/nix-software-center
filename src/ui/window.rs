@@ -14,7 +14,7 @@ use crate::{
 };
 use adw::prelude::*;
 use log::*;
-use nix_data::config::configfile::NixDataConfig;
+use nix_data::config::configfile::{DefaultInstall, NixDataConfig};
 use relm4::{
     self,
     actions::{RelmAction, RelmActionGroup},
@@ -139,6 +139,7 @@ pub struct AppModel {
 pub enum AppMsg {
     UpdateSysconfig(Option<String>),
     UpdateFlake(Option<String>, Option<String>),
+    UpdateDefaultInstall(DefaultInstall),
     TryLoad,
     UpdateDB,
     LoadConfig(NixDataConfig),
@@ -437,6 +438,7 @@ impl Component for AppModel {
                     flake: None,
                     flakearg: None,
                     generations: None,
+                    defaultinstall: None,
                 },
                 true,
             )
@@ -724,6 +726,7 @@ impl Component for AppModel {
                     flake: self.config.flake.clone(),
                     flakearg: self.config.flakearg.clone(),
                     generations: self.config.generations,
+                    defaultinstall: self.config.defaultinstall,
                 };
                 if editconfig(self.config.clone()).is_err() {
                     warn!("Failed to update config");
@@ -763,6 +766,7 @@ impl Component for AppModel {
                     flake: flake.clone(),
                     flakearg,
                     generations: self.config.generations,
+                    defaultinstall: self.config.defaultinstall,
                 };
                 if editconfig(self.config.clone()).is_err() {
                     warn!("Failed to update config");
@@ -792,6 +796,13 @@ impl Component for AppModel {
                     self.syspkgtype.clone(),
                     self.userpkgtype.clone(),
                 ));
+            }
+            AppMsg::UpdateDefaultInstall(defaultinstall) => {
+                self.config.defaultinstall = Some(defaultinstall);
+                if editconfig(self.config.clone()).is_err() {
+                    warn!("Failed to update config");
+                }
+                self.pkgpage.emit(PkgMsg::UpdateConfig(self.config.clone()));
             }
             AppMsg::Initialize(
                 pkgdb,

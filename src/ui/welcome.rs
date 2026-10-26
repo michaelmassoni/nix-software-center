@@ -225,6 +225,7 @@ impl SimpleComponent for WelcomeModel {
                     flake: self.flakepath.as_ref().map(|x| x.to_string_lossy().to_string()),
                     flakearg: None,
                     generations: None,
+                    defaultinstall: None,
                 };
                 sender.output(AppMsg::LoadConfig(config));
                 self.hidden = true;

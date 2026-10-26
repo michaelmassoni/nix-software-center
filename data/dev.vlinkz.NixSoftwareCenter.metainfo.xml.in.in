@@ -10,17 +10,17 @@
   </description>
   <screenshots>
     <screenshot type="default">
-      <image>https://raw.githubusercontent.com/vlinkz/nix-software-center/main/data/screenshots/frontpage-light.png</image>
+      <image>https://raw.githubusercontent.com/michaelmassoni/nix-software-center/main/data/screenshots/frontpage-light.png</image>
       <caption>Main window</caption>
     </screenshot>
     <screenshot type="default">
-      <image>https://raw.githubusercontent.com/vlinkz/nix-software-center/main/data/screenshots/application-light.png</image>
+      <image>https://raw.githubusercontent.com/michaelmassoni/nix-software-center/main/data/screenshots/application-light.png</image>
       <caption>Application Page</caption>
     </screenshot>
   </screenshots>
-  <url type="homepage">https://github.com/vlinkz/nix-software-center</url>
-  <url type="bugtracker">https://github.com/vlinkz/nix-software-center/issues</url>
-  <developer_name>Victor Fuentes</developer_name>
+  <url type="homepage">https://github.com/michaelmassoni/nix-software-center</url>
+  <url type="bugtracker">https://github.com/michaelmassoni/nix-software-center/issues</url>
+  <developer_name>Michael Massoni</developer_name>
   <update_contact>vmfuentes64@gmail.com</update_contact>
   <translation type="gettext">@gettext-package@</translation>
   <launchable type="desktop-id">@app-id@.desktop</launchable>

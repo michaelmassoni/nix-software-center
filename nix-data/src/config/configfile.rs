@@ -21,8 +21,18 @@ pub struct NixDataConfig {
     /// Specifies how many NixOS generations to keep. If set to 0, all generations will be kept.
     /// If not set, the default is 5.
     pub generations: Option<u32>,
+    /// Where packages that aren't installed yet are installed. If not set, they are installed for the user.
+    pub defaultinstall: Option<DefaultInstall>,
 }
 
+
+/// Where new packages are installed: for the user (`nix profile` or `nix-env`) or in the system configuration.
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone, Copy, Debug)]
+#[serde(rename_all = "lowercase")]
+pub enum DefaultInstall {
+    User,
+    System,
+}
 
 /// Type of package management used by the user.
 /// - [Profile](UserPkgType::Profile) refers to the `nix profile` command.

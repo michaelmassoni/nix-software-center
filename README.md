@@ -23,14 +23,16 @@ Changes in this fork:
 
 - **Current package list:** built from the `packages.json` that [channels.nixos.org](https://channels.nixos.org) publishes for your channel. It's rebuilt automatically when the channel moves to a new release.
 - **Newer app details:** icons, screenshots and descriptions come from [snowfallorg/nixos-appstream-data](https://github.com/snowfallorg/nixos-appstream-data), which covers about 1,500 apps. Packages it doesn't cover use a matching icon from your icon theme, if there is one.
-- **Bug fixes:** installed-version lookups no longer fail on current NixOS, which added a `specialisations` field to `nixos-version --json`.
+- **Working updates:** the Updates page lists packages with newer versions, showing the installed and the available version. System packages update together with **Update**; `nix profile` and `nix-env` packages can also be updated one at a time.
+- **Current Nix support:** fixes for `nix profile` manifests, `nix profile upgrade`/`remove`, `nix flake update` and `nixos-version --json` on current Nix and NixOS.
 
 ## Features
 
 - Browse and search nixpkgs by category
 - Install and remove packages in your `configuration.nix`, then rebuild the system. Flake-based systems are supported; set your flake path in Preferences.
 - Install packages for your user with `nix profile` or `nix-env`
-- See available updates for installed packages
+- Choose in Preferences whether new packages install for your user or system-wide by default
+- See and install updates for installed packages
 - Try an app without installing it, using `nix-shell` or `nix run`
 
 ## Installation on NixOS
@@ -107,7 +109,6 @@ If flakes aren't enabled on your system, add `--extra-experimental-features "nix
 
 ## Known limitations
 
-- Update checks for packages installed with `nix profile` still use upstream's old version data.
 - Apps added to nixpkgs since February 2026 have no icons or screenshots until Snowfall regenerates its AppStream data.
 
 ## Debugging

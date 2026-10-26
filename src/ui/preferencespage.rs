@@ -1,7 +1,7 @@
 use std::path::{PathBuf, Path};
 use super::window::AppMsg;
 use adw::prelude::*;
-use nix_data::config::configfile::NixDataConfig;
+use nix_data::config::configfile::{DefaultInstall, NixDataConfig};
 use relm4::*;
 use relm4_components::open_dialog::*;
 
@@ -11,6 +11,7 @@ pub struct PreferencesPageModel {
     configpath: Option<PathBuf>,
     flake: Option<PathBuf>,
     flakearg: Option<String>,
+    defaultinstall: DefaultInstall,
     #[tracker::no_eq]
     open_dialog: Controller<OpenDialog>,
     #[tracker::no_eq]
@@ -25,6 +26,7 @@ pub enum PreferencesPageMsg {
     SetConfigPath(Option<PathBuf>),
     SetFlakePath(Option<PathBuf>),
     SetFlakeArg(Option<String>),
+    SetDefaultInstall(DefaultInstall),
     ModifyFlake,
     Ignore,
 }
@@ -43,6 +45,29 @@ impl SimpleComponent for PreferencesPageModel {
             set_modal: true,
             set_search_enabled: false,
             add = &adw::PreferencesPage {
+                add = &adw::PreferencesGroup {
+                    // Installing to the system needs a NixOS configuration
+                    set_visible: Path::new("/etc/NIXOS").exists(),
+                    add = &adw::ComboRow {
+                        set_title: "Default installation",
+                        set_subtitle: "Where packages that aren't installed yet are installed",
+                        set_model: Some(&gtk::StringList::new(&["User", "System"])),
+                        connect_selected_notify[sender] => move |row| {
+                            sender.input(PreferencesPageMsg::SetDefaultInstall(if row.selected() == 1 {
+                                DefaultInstall::System
+                            } else {
+                                DefaultInstall::User
+                            }));
+                        } @defaultinstallchanged,
+                        #[track(model.changed(PreferencesPageModel::defaultinstall()))]
+                        #[block_signal(defaultinstallchanged)]
+                        set_selected: match model.defaultinstall {
+                            DefaultInstall::User => 0,
+                            DefaultInstall::System => 1,
+                        },
+                    }
+                },
+
                 add = &adw::PreferencesGroup {
                     // set_title: "Preferences",
                     set_visible: Path::new("/etc/NIXOS").exists(),
@@ -195,6 +220,7 @@ impl SimpleComponent for PreferencesPageModel {
             configpath: None,
             flake: None,
             flakearg: None,
+            defaultinstall: DefaultInstall::User,
             open_dialog,
             flake_file_dialog,
             tracker: 0,
@@ -212,6 +238,7 @@ impl SimpleComponent for PreferencesPageModel {
                 self.configpath = config.systemconfig.as_ref().map(PathBuf::from);
                 self.set_flake(config.flake.as_ref().map(PathBuf::from));
                 self.set_flakearg(config.flakearg);
+                self.set_defaultinstall(config.defaultinstall.unwrap_or(DefaultInstall::User));
             }
             PreferencesPageMsg::Open => self.open_dialog.emit(OpenDialogMsg::Open),
             PreferencesPageMsg::OpenFlake => self.flake_file_dialog.emit(OpenDialogMsg::Open),
@@ -226,6 +253,10 @@ impl SimpleComponent for PreferencesPageModel {
             PreferencesPageMsg::SetFlakeArg(arg) => {
                 self.flakearg = arg;
                 sender.input(PreferencesPageMsg::ModifyFlake)
+            }
+            PreferencesPageMsg::SetDefaultInstall(defaultinstall) => {
+                self.defaultinstall = defaultinstall;
+                sender.output(AppMsg::UpdateDefaultInstall(defaultinstall));
             }
             PreferencesPageMsg::ModifyFlake => {
                 sender.output(AppMsg::UpdateFlake(self.flake.as_ref().map(|x| x.to_string_lossy().to_string()), self.flakearg.clone()));

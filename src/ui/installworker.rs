@@ -50,7 +50,8 @@ impl Worker for InstallAsyncHandler {
                 systemconfig: None,
                 flake: None,
                 flakearg: None,
-                generations: None
+                generations: None,
+                defaultinstall: None,
             },
             pid: None,
             syspkgs: params.syspkgs,

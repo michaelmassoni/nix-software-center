@@ -65,7 +65,8 @@ impl Worker for UpdateAsyncHandler {
                 systemconfig: None,
                 flake: None,
                 flakearg: None,
-                generations: None
+                generations: None,
+                defaultinstall: None,
             },
             syspkgs: params.syspkgs,
             userpkgs: params.userpkgs,

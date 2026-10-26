@@ -41,15 +41,24 @@ impl SimpleComponent for AboutPageModel {
         let dialog = adw::AboutWindow::builder()
             .application_icon(config::APP_ID)
             .application_name("Nix Software Center")
-            .developer_name("Victor Fuentes")
-            .developers(vec!["Victor Fuentes https://github.com/vlinkz"])
-            .issue_url("https://github.com/vlinkz/nix-software-center/issues")
+            .developer_name("Michael Massoni")
+            .developers(vec!["Michael Massoni https://github.com/michaelmassoni"])
+            .issue_url("https://github.com/michaelmassoni/nix-software-center/issues")
             .license_type(gtk::License::Gpl30)
             .modal(true)
             .transient_for(&dialog.parent_window)
             .version(config::VERSION)
-            .website("https://github.com/vlinkz/nix-software-center")
+            .website("https://github.com/michaelmassoni/nix-software-center")
             .build();
+        // This is a fork: credit the original project and the app data it relies on
+        dialog.add_credit_section(
+            Some("Original Author"),
+            &["Victor Fuentes https://github.com/vlinkz"],
+        );
+        dialog.add_acknowledgement_section(
+            Some("App Data"),
+            &["Snowfall https://github.com/snowfallorg/nixos-appstream-data"],
+        );
         dialog.present();
     }
 }
