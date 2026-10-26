@@ -216,10 +216,7 @@ impl Worker for InstallAsyncHandler {
                                         let mut p = tokio::process::Command::new("nix")
                                             .arg("profile")
                                             .arg("remove")
-                                            .arg(&format!(
-                                                "legacyPackages.x86_64-linux.{}",
-                                                work.pkg
-                                            ))
+                                            .arg(nix_data::cache::profile::profilearg(&work.pkg))
                                             .kill_on_drop(true)
                                             .stdout(Stdio::piped())
                                             .stderr(Stdio::piped())

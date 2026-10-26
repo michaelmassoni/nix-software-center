@@ -38,7 +38,7 @@ pub enum UpdatePageMsg {
     UpdateSystemRm(Vec<String>),
     UpdateAllUser,
     UpdateAllUserRm(Vec<String>),
-    UpdateUser(String),
+    UpdateUser(String, String),
     // UpdateChannels,
     // UpdateSystemAndChannels,
     UpdateAll,
@@ -333,9 +333,16 @@ impl SimpleComponent for UpdatePageModel {
                 info!("UpdatePageMsg::UpdateSystemRm({:?})", pkgs);
                 self.updateworker.emit(UpdateAsyncHandlerMsg::UpdateSystemRemove(pkgs));
             }
-            UpdatePageMsg::UpdateUser(pkg) => {
+            UpdatePageMsg::UpdateUser(pkg, pname) => {
                 info!("UPDATE USER PKG: {}", pkg);
-                warn!("unimplemented");
+                let online = util::checkonline();
+                if !online {
+                    sender.output(AppMsg::CheckNetwork);
+                    self.online = false;
+                    return;
+                }
+                REBUILD_BROKER.send(RebuildMsg::Show);
+                self.updateworker.emit(UpdateAsyncHandlerMsg::UpdateUserPkg(pkg, pname));
             }
             UpdatePageMsg::UpdateAllUser => {
                 let online = util::checkonline();
@@ -441,7 +448,10 @@ pub struct UpdateItemModel {
 }
 
 #[derive(Debug)]
-pub enum UpdateItemMsg {}
+pub enum UpdateItemMsg {
+    /// Attribute and pname of a user package to update
+    Update(String, String),
+}
 
 #[relm4::factory(pub)]
 impl FactoryComponent for UpdateItemModel {
@@ -540,13 +550,19 @@ impl FactoryComponent for UpdateItemModel {
                         set_max_width_chars: 0,
                     },
                 },
-                // gtk::Button {
-                //     set_visible: self.item.pkgtype == InstallType::User,
-                //     set_valign: gtk::Align::Center,
-                //     set_halign: gtk::Align::End,
-                //     set_label: "Update",
-                //     set_can_focus: false,
-                // }
+                // System packages all come from one nixpkgs, so only user packages update one at a time
+                gtk::Button {
+                    set_visible: self.item.pkgtype == InstallType::User && self.item.pkg.is_some(),
+                    set_valign: gtk::Align::Center,
+                    set_halign: gtk::Align::End,
+                    set_label: "Update",
+                    set_can_focus: false,
+                    connect_clicked[sender, pkg = self.item.pkg.clone(), pname = self.item.pname.clone()] => move |_| {
+                        if let Some(pkg) = &pkg {
+                            sender.output(UpdateItemMsg::Update(pkg.to_string(), pname.to_string()));
+                        }
+                    }
+                }
             }
         }
     }
@@ -581,5 +597,11 @@ impl FactoryComponent for UpdateItemModel {
         };
 
         Self { item }
+    }
+
+    fn forward_to_parent(output: Self::Output) -> Option<UpdatePageMsg> {
+        Some(match output {
+            UpdateItemMsg::Update(pkg, pname) => UpdatePageMsg::UpdateUser(pkg, pname),
+        })
     }
 }

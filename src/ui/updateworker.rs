@@ -35,6 +35,8 @@ pub enum UpdateAsyncHandlerMsg {
     RebuildSystem,
     UpdateUserPkgs,
     UpdateUserPkgsRemove(Vec<String>),
+    /// Attribute and pname of one user package
+    UpdateUserPkg(String, String),
 
     UpdateAll,
     UpdateAllRemove(Vec<String>, Vec<String>),
@@ -137,12 +139,30 @@ impl Worker for UpdateAsyncHandler {
                     }
                 });
             }
+            UpdateAsyncHandlerMsg::UpdateUserPkg(pkg, pname) => {
+                let userpkgs = self.userpkgs.clone();
+                relm4::spawn(async move {
+                    let result = match userpkgs {
+                        UserPkgs::Env => updateenv(Some(pname)).await,
+                        UserPkgs::Profile => updateprofile(None, Some(pkg)).await,
+                    };
+                    match result {
+                        Ok(true) => {
+                            sender.output(UpdatePageMsg::DoneWorking);
+                        }
+                        _ => {
+                            warn!("UPDATE USER FAILED");
+                            sender.output(UpdatePageMsg::FailedWorking);
+                        }
+                    }
+                });
+            }
             UpdateAsyncHandlerMsg::UpdateUserPkgs => {
                 let userpkgs = self.userpkgs.clone();
                 relm4::spawn(async move {
                     let result = match userpkgs {
-                        UserPkgs::Env => updateenv().await,
-                        UserPkgs::Profile => updateprofile(None).await,
+                        UserPkgs::Env => updateenv(None).await,
+                        UserPkgs::Profile => updateprofile(None, None).await,
                     };
                     match result {
                         Ok(true) => {
@@ -159,8 +179,8 @@ impl Worker for UpdateAsyncHandler {
                 let userpkgs = self.userpkgs.clone();
                 relm4::spawn(async move {
                     let result = match userpkgs {
-                        UserPkgs::Env => updateenv().await,
-                        UserPkgs::Profile => updateprofile(Some(pkgs)).await,
+                        UserPkgs::Env => updateenv(None).await,
+                        UserPkgs::Profile => updateprofile(Some(pkgs), None).await,
                     };
                     match result {
                         Ok(true) => {
@@ -182,8 +202,8 @@ impl Worker for UpdateAsyncHandler {
                     match result {
                         Ok(true) => {
                             match match userpkgs {
-                                UserPkgs::Env => updateenv().await,
-                                UserPkgs::Profile => updateprofile(None).await,
+                                UserPkgs::Env => updateenv(None).await,
+                                UserPkgs::Profile => updateprofile(None, None).await,
                             } {
                                 Ok(true) => {
                                     sender.output(UpdatePageMsg::DoneWorking);
@@ -216,8 +236,8 @@ impl Worker for UpdateAsyncHandler {
                     match result {
                         Ok(true) => {
                             match match userpkgs {
-                                UserPkgs::Env => updateenv().await,
-                                UserPkgs::Profile => updateprofile(Some(userrmpkgs)).await,
+                                UserPkgs::Env => updateenv(None).await,
+                                UserPkgs::Profile => updateprofile(Some(userrmpkgs), None).await,
                             } {
                                 Ok(true) => {
                                     sender.output(UpdatePageMsg::DoneWorking);
@@ -429,9 +449,11 @@ async fn runcmd(
     }
 }
 
-async fn updateenv() -> Result<bool> {
+/// Runs `nix-env -u`, for one package when `pname` is given
+async fn updateenv(pname: Option<String>) -> Result<bool> {
     let mut cmd = tokio::process::Command::new("nix-env")
         .arg("-u")
+        .args(pname)
         .stderr(Stdio::piped())
         .spawn()?;
 
@@ -450,7 +472,8 @@ async fn updateenv() -> Result<bool> {
     }
 }
 
-async fn updateprofile(rmpkgs: Option<Vec<String>>) -> Result<bool> {
+/// Removes `rmpkgs`, then runs `nix profile upgrade` for the package with attribute `pkg`, or for everything
+async fn updateprofile(rmpkgs: Option<Vec<String>>, pkg: Option<String>) -> Result<bool> {
     if let Some(rmpkgs) = rmpkgs {
         if !rmpkgs.is_empty() {
             let mut cmd = tokio::process::Command::new("nix")
@@ -459,7 +482,7 @@ async fn updateprofile(rmpkgs: Option<Vec<String>>) -> Result<bool> {
                 .args(
                     &rmpkgs
                         .iter()
-                        .map(|x| format!("legacyPackages.x86_64-linux.{}", x))
+                        .map(|x| nix_data::cache::profile::profilearg(x))
                         .collect::<Vec<String>>(),
                 )
                 // Allow updating potential unfree packages
@@ -479,10 +502,16 @@ async fn updateprofile(rmpkgs: Option<Vec<String>>) -> Result<bool> {
         }
     }
 
+    let target = match pkg {
+        Some(pkg) => nix_data::cache::profile::profilearg(&pkg),
+        // Nix 2.20+ matches names, not regexes, so '.*' would upgrade nothing
+        None if nix_data::cache::profile::namedmanifest() => String::from("--all"),
+        None => String::from(".*"),
+    };
     let mut cmd = tokio::process::Command::new("nix")
         .arg("profile")
         .arg("upgrade")
-        .arg(".*")
+        .arg(target)
         // Allow updating potential unfree packages
         .arg("--impure")
         .stderr(Stdio::piped())

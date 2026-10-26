@@ -1372,22 +1372,27 @@ FROM pkgs JOIN meta ON (pkgs.attribute = meta.attribute) WHERE pkgs.attribute = 
                             }
                         }
                         UserPkgs::Profile => {
-                            for installedpkg in self.installeduserpkgs.keys() {
+                            for (installedpkg, installedver) in &self.installeduserpkgs {
                                 debug!("Checking package {}", installedpkg);
-                                let (pname, version): (String, String) = sqlx::query_as(
-                                    "SELECT pname, version FROM pkgs WHERE attribute = $1",
+                                // Packages from other flakes aren't in the catalog, so they're shown by attribute path
+                                let pname = sqlx::query_as::<_, (String,)>(
+                                    "SELECT pname FROM pkgs WHERE attribute = $1",
                                 )
                                 .bind(installedpkg)
-                                .fetch_one(pool)
+                                .fetch_optional(pool)
                                 .await
-                                .unwrap();
-                                let (description,): (String,) = sqlx::query_as(
+                                .ok()
+                                .flatten()
+                                .map_or(installedpkg.clone(), |(pname,)| pname);
+                                let description = sqlx::query_as::<_, (String,)>(
                                     "SELECT description FROM meta WHERE attribute = $1",
                                 )
                                 .bind(installedpkg)
-                                .fetch_one(pool)
+                                .fetch_optional(pool)
                                 .await
-                                .unwrap();
+                                .ok()
+                                .flatten()
+                                .map_or(String::new(), |(description,)| description);
                                 let mut name = pname.to_string();
                                 let mut summary = if description.is_empty() {
                                     None
@@ -1423,29 +1428,33 @@ FROM pkgs JOIN meta ON (pkgs.attribute = meta.attribute) WHERE pkgs.attribute = 
                                         .installedpagebusy
                                         .contains(&(installedpkg.clone(), InstallType::User)),
                                 });
+                                // Latest is the version `nix profile upgrade` would install
                                 if let Some(latest) = &self.nixpkgsdb {
                                     if let Ok(latestpool) =
                                         &SqlitePool::connect(&format!("sqlite://{}", latest)).await
                                     {
-                                        let (newver,): (String,) = sqlx::query_as(
+                                        let newver: Option<(String,)> = sqlx::query_as(
                                             "SELECT version FROM pkgs WHERE attribute = $1",
                                         )
                                         .bind(installedpkg)
-                                        .fetch_one(latestpool)
+                                        .fetch_optional(latestpool)
                                         .await
-                                        .unwrap();
-                                        debug!("PROFILE: {} {} {}", installedpkg, version, newver);
-                                        if version != newver {
-                                            updateuseritems.push(UpdateItem {
-                                                name,
-                                                pname,
-                                                pkg: Some(installedpkg.clone()),
-                                                summary,
-                                                icon,
-                                                pkgtype: InstallType::System,
-                                                verfrom: Some(version.clone()),
-                                                verto: Some(newver.clone()),
-                                            })
+                                        .ok()
+                                        .flatten();
+                                        if let Some((newver,)) = newver {
+                                            debug!("PROFILE: {} {} {}", installedpkg, installedver, newver);
+                                            if *installedver != newver {
+                                                updateuseritems.push(UpdateItem {
+                                                    name,
+                                                    pname,
+                                                    pkg: Some(installedpkg.clone()),
+                                                    summary,
+                                                    icon,
+                                                    pkgtype: InstallType::User,
+                                                    verfrom: Some(installedver.clone()),
+                                                    verto: Some(newver),
+                                                })
+                                            }
                                         }
                                     }
                                 }

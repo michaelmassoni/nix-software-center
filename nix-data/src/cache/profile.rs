@@ -1,15 +1,11 @@
-use crate::{
-    cache::nixos,
-    CACHEDIR,
-};
-use anyhow::{anyhow, Context, Result};
-use log::{debug, error, info};
+use crate::{cache::nixos, CACHEDIR};
+use anyhow::{Context, Result};
+use log::{debug, error};
 use serde::Deserialize;
 use sqlx::SqlitePool;
 use std::{
     collections::{HashMap, HashSet},
-    fs::{self, File},
-    io::{Read, Write},
+    fs::File,
     path::Path,
     process::Command,
 };
@@ -18,7 +14,16 @@ use super::nixos::nixospkgs;
 
 #[derive(Debug, Deserialize)]
 struct ProfilePkgsRoot {
-    elements: Vec<ProfilePkgOut>,
+    elements: ProfileElements,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ProfileElements {
+    // Manifest version 3 (Nix 2.20+): keyed by element name
+    Named(HashMap<String, ProfilePkgOut>),
+    // Older manifests: a list
+    List(Vec<ProfilePkgOut>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,216 +39,160 @@ struct ProfilePkgOut {
 /// Struct containing information about a package installed with `nix profile`.
 #[derive(Debug)]
 pub struct ProfilePkg {
+    /// Store path name, e.g. `hello-2.12.3`
     pub name: String,
     pub originalurl: String,
+    /// Name `nix profile` commands use for the package (Nix 2.20+)
+    pub element: Option<String>,
+    /// Installed version, from the store path name
+    pub version: Option<String>,
 }
 
-/// Returns a list of all packages installed with `nix profile` with their name.
-/// Does not include individual version.
+/// Returns the elements of `~/.nix-profile/manifest.json`, with their names when the manifest has them.
+fn manifestelements() -> Result<Vec<(Option<String>, ProfilePkgOut)>> {
+    let manifest = format!("{}/.nix-profile/manifest.json", std::env::var("HOME")?);
+    if !Path::new(&manifest).exists() {
+        return Ok(vec![]);
+    }
+    let profileroot: ProfilePkgsRoot = serde_json::from_reader(File::open(&manifest)?)?;
+    Ok(match profileroot.elements {
+        ProfileElements::Named(elements) => elements
+            .into_iter()
+            .map(|(name, pkg)| (Some(name), pkg))
+            .collect(),
+        ProfileElements::List(elements) => elements.into_iter().map(|pkg| (None, pkg)).collect(),
+    })
+}
+
+/// Splits a nixpkgs attribute path like `legacyPackages.x86_64-linux.hello` into its package set and attribute.
+fn legacyattr(attrpath: &str) -> Option<(String, String)> {
+    let parts = attrpath.split('.').collect::<Vec<_>>();
+    if parts.len() < 3 || parts[0] != "legacyPackages" {
+        return None;
+    }
+    Some((parts[..2].join("."), parts[2..].join(".")))
+}
+
+/// The version in a store path name, split the way `builtins.parseDrvName` does:
+/// it starts after the first `-` that isn't followed by a letter.
+fn drvversion(name: &str) -> Option<&str> {
+    let bytes = name.as_bytes();
+    (0..bytes.len().saturating_sub(1))
+        .find(|&i| bytes[i] == b'-' && !bytes[i + 1].is_ascii_alphabetic())
+        .map(|i| &name[i + 1..])
+}
+
+/// Returns a list of all packages installed with `nix profile`.
+/// Keyed by nixpkgs attribute, or by `flake#attrPath` for packages from other flakes.
 pub fn getprofilepkgs() -> Result<HashMap<String, ProfilePkg>> {
-    if !Path::new(&format!(
-        "{}/.nix-profile/manifest.json",
-        std::env::var("HOME")?
-    ))
-    .exists()
-    {
-        return Ok(HashMap::new());
-    }
-    let profileroot: ProfilePkgsRoot = serde_json::from_reader(File::open(&format!(
-        "{}/.nix-profile/manifest.json",
-        std::env::var("HOME")?
-    ))?)?;
     let mut out = HashMap::new();
-    for pkg in profileroot.elements {
+    for (element, pkg) in manifestelements()? {
         if let (Some(attrpath), Some(originalurl)) = (pkg.attrpath, pkg.originalurl) {
-            let attr = if attrpath.starts_with("legacyPackages") {
-                attrpath
-                    .split('.')
-                    .collect::<Vec<_>>()
-                    .get(2..)
-                    .context("Failed to get legacyPackage attribute")?
-                    .join(".")
-            } else {
-                format!("{}#{}", originalurl, attrpath)
+            let attr = match legacyattr(&attrpath) {
+                Some((_, attr)) => attr,
+                None => format!("{}#{}", originalurl, attrpath),
             };
-            if let Some(first) = pkg.storepaths.get(0) {
-                let ver = first
-                    .get(44..)
-                    .context("Failed to get pkg name from store path")?;
-                out.insert(
-                    attr,
-                    ProfilePkg {
-                        name: ver.to_string(),
-                        originalurl,
-                    },
-                );
-            }
+            // Extra outputs (e.g. hello-2.12.3-man) have longer names than the main one
+            let name = pkg
+                .storepaths
+                .iter()
+                .filter_map(|p| p.get(44..))
+                .min_by_key(|n| n.len())
+                .context("Failed to get pkg name from store path")?
+                .to_string();
+            out.insert(
+                attr,
+                ProfilePkg {
+                    version: drvversion(&name).map(str::to_string),
+                    name,
+                    originalurl,
+                    element,
+                },
+            );
         }
     }
     Ok(out)
 }
 
-/// Returns a list of all packages installed with `nix profile` with their name and version.
-/// Takes a bit longer than [getprofilepkgs()].
+/// Returns the name `nix profile` commands use for the package installed from nixpkgs attribute `attr`.
+pub fn elementname(attr: &str) -> Option<String> {
+    getprofilepkgs().ok()?.remove(attr)?.element
+}
+
+/// Returns the argument `nix profile remove` and `upgrade` take for the package installed from nixpkgs
+/// attribute `attr`: its element name on Nix 2.20+, else its attribute path as older Nix expects.
+pub fn profilearg(attr: &str) -> String {
+    elementname(attr).unwrap_or_else(|| format!("legacyPackages.x86_64-linux.{}", attr))
+}
+
+/// Whether the profile manifest names its elements (Nix 2.20+), which `nix profile upgrade --all` needs.
+pub fn namedmanifest() -> bool {
+    getprofilepkgs().map_or(false, |pkgs| pkgs.values().any(|pkg| pkg.element.is_some()))
+}
+
+/// Returns a list of all packages installed with `nix profile` with their installed version.
 pub async fn getprofilepkgs_versioned() -> Result<HashMap<String, String>> {
-    if !Path::new(&format!(
-        "{}/.nix-profile/manifest.json",
-        std::env::var("HOME")?
-    ))
-    .exists()
-    {
-        return Ok(HashMap::new());
-    }
-    let profilepkgs = getprofilepkgs()?;
-    let latestpkgs = if Path::new(&format!("{}/nixpkgs.db", &*CACHEDIR)).exists() {
-        format!("{}/nixpkgs.db", &*CACHEDIR)
-    } else {
-        // Change to something else if overridden
-        nixpkgslatest().await?
-    };
-    let mut out = HashMap::new();
-    let pool = SqlitePool::connect(&format!("sqlite://{}", latestpkgs)).await?;
-    for (pkg, _v) in profilepkgs {
-        let versions: Vec<(String,)> = sqlx::query_as(
-            r#"
-            SELECT version FROM pkgs WHERE attribute = $1
-            "#,
-        )
-        .bind(&pkg)
-        .fetch_all(&pool)
-        .await?;
-        if !versions.is_empty() {
-            out.insert(pkg, versions.get(0).unwrap().0.to_string());
-        }
-    }
-    Ok(out)
+    Ok(getprofilepkgs()?
+        .into_iter()
+        .filter_map(|(attr, pkg)| Some((attr, pkg.version?)))
+        .collect())
 }
 
-/// Downloads a list of available package versions `packages.db`
-/// and returns the path to the file.
+/// Builds `nixpkgs.db` with the version each `nix profile` package would be upgraded to, and returns its path.
+/// Versions are evaluated in the flake each package was installed from (e.g. `flake:nixpkgs`,
+/// resolved through the registry the same way `nix profile upgrade` resolves it).
 pub async fn nixpkgslatest() -> Result<String> {
     // If cache directory doesn't exist, create it
-    if !std::path::Path::new(&*CACHEDIR).exists() {
+    if !Path::new(&*CACHEDIR).exists() {
         std::fs::create_dir_all(&*CACHEDIR)?;
     }
 
-    let mut nixpkgsver = None;
-    let mut pinned = false;
-    let regout = Command::new("nix").arg("registry").arg("list").output()?;
-    let reg = String::from_utf8(regout.stdout)?.replace("   ", " ");
-
-    let mut latestnixpkgsver = String::new();
-
-    for l in reg.split('\n') {
-        let parts = l.split(' ').collect::<Vec<_>>();
-        if let Some(x) = parts.get(1) {
-            if x == &"flake:nixpkgs" {
-                if let Some(x) = parts.get(2) {
-                    nixpkgsver = Some(x.to_string().replace("github:NixOS/nixpkgs/", ""));
-
-                    if let Some(rev) = x.find("&rev=") {
-                        if let Some(rev) = (*x).get(rev + 5..) {
-                            info!(
-                                "Found specific revision: {}. Switching to versioned checking",
-                                rev
-                            );
-                            nixpkgsver = Some(rev.to_string());
-                            latestnixpkgsver = rev.to_string();
-                            pinned = true;
-                        }
-                    }
-                    break;
-                }
+    // Attributes to evaluate, grouped by flake and package set
+    let mut groups: HashMap<(String, String), Vec<String>> = HashMap::new();
+    for (_, pkg) in manifestelements()? {
+        if let (Some(attrpath), Some(originalurl)) = (pkg.attrpath, pkg.originalurl) {
+            if let Some((set, attr)) = legacyattr(&attrpath) {
+                groups.entry((originalurl, set)).or_default().push(attr);
             }
         }
     }
 
-    if !pinned {
-        let verurl = if let Some(v) = &nixpkgsver {
-            format!(
-                "https://raw.githubusercontent.com/snowflakelinux/nix-data-db/main/{}/nixpkgs.ver",
-                v
-            )
-        } else {
-            String::from("https://raw.githubusercontent.com/snowflakelinux/nix-data-db/main/nixpkgs-unstable/nixpkgs.ver")
-        };
-        debug!("Checking nixpkgs version");
-        let resp = reqwest::get(&verurl).await;
-        let resp = if let Ok(r) = resp {
-            r
-        } else {
-            // Internet connection failed
-            // Check if we can use the old database
-            let dbpath = format!("{}/nixpkgs.db", &*CACHEDIR);
-            if Path::new(&dbpath).exists() {
-                info!("Using old database");
-                return Ok(dbpath);
-            } else {
-                return Err(anyhow!("Could not find latest nixpkgs version"));
-            }
-        };
-        latestnixpkgsver = if resp.status().is_success() {
-            resp.text().await?
-        } else {
-            return Err(anyhow!("Could not find latest nixpkgs version"));
-        };
-        debug!("Latest nixpkgs version: {}", latestnixpkgsver);
+    let mut versions = HashMap::new();
+    for ((url, set), attrs) in groups {
+        debug!("Evaluating latest versions in {}#{}", url, set);
+        // A version of null means the attribute is gone or fails to evaluate
+        let apply = format!(
+            r#"p: builtins.listToAttrs (map (a: {{ name = a; value = let r = builtins.tryEval ((builtins.foldl' (s: k: s.${{k}} or null) p (builtins.filter builtins.isString (builtins.split "\\." a))).version or null); in if r.success then r.value else null; }}) (builtins.fromJSON ''{}''))"#,
+            serde_json::to_string(&attrs)?
+        );
+        let out = Command::new("nix")
+            .arg("eval")
+            .arg("--json")
+            .arg(format!("{}#{}", url, set))
+            .arg("--apply")
+            .arg(&apply)
+            .output()?;
+        if !out.status.success() {
+            error!(
+                "Failed to evaluate versions in {}: {}",
+                url,
+                String::from_utf8_lossy(&out.stderr)
+            );
+            continue;
+        }
+        let evaluated: HashMap<String, Option<String>> = serde_json::from_slice(&out.stdout)?;
+        versions.extend(
+            evaluated
+                .into_iter()
+                .filter_map(|(attr, version)| Some((attr, version?))),
+        );
     }
 
-    // Check if latest version is already downloaded
-    if let Ok(prevver) = fs::read_to_string(&format!("{}/nixpkgs.ver", &*CACHEDIR)) {
-        if prevver == latestnixpkgsver && Path::new(&format!("{}/nixpkgs.db", &*CACHEDIR)).exists()
-        {
-            debug!("No new version of nixpkgs found");
-            return Ok(format!("{}/nixpkgs.db", &*CACHEDIR));
-        }
-    }
-
-    let url = if pinned {
-        format!(
-            "https://raw.githubusercontent.com/snowflakelinux/nixpkgs-version-data/main/nixos-unstable/{}.json.br",
-            latestnixpkgsver
-        )
-    } else if let Some(v) = &nixpkgsver {
-        format!(
-            "https://raw.githubusercontent.com/snowflakelinux/nix-data-db/main/{}/nixpkgs_versions.db.br",
-            v
-        )
-    } else {
-        String::from("https://raw.githubusercontent.com/snowflakelinux/nix-data-db/main/nixpkgs-unstable/nixpkgs_versions.db.br")
-    };
-    debug!("Downloading nix-data database");
-    let client = reqwest::Client::builder().brotli(true).build()?;
-    let resp = client.get(url).send().await?;
-    if resp.status().is_success() {
-        debug!("Writing nix-data database");
-        // let mut out = File::create(&format!("{}/nixpkgs.db", &*CACHEDIR))?;
-        {
-            let bytes = resp.bytes().await?;
-            let mut br = brotli::Decompressor::new(bytes.as_ref(), 4096);
-            let mut pkgsout = Vec::new();
-            br.read_to_end(&mut pkgsout)?;
-            if pinned {
-                let pkgsjson: HashMap<String, String> = serde_json::from_slice(&pkgsout)?;
-                let dbfile = format!("{}/nixpkgs.db", &*CACHEDIR);
-                nixos::createdb(&dbfile, &pkgsjson).await?;
-            } else {
-                let mut out = File::create(&format!("{}/nixpkgs.db", &*CACHEDIR))?;
-                if let Err(e) = out.write_all(&pkgsout) {
-                    error!("{}", e);
-                    return Err(anyhow!("Failed write to nixpkgs.br"));
-                }
-            }
-        }
-        debug!("Writing nix-data version");
-        // Write version downloaded to file
-        File::create(format!("{}/nixpkgs.ver", &*CACHEDIR))?
-            .write_all(latestnixpkgsver.as_bytes())?;
-    } else {
-        return Err(anyhow!("Failed to download latest nixpkgs.db.br"));
-    }
-    Ok(format!("{}/nixpkgs.db", &*CACHEDIR))
+    let dbfile = format!("{}/nixpkgs.db", &*CACHEDIR);
+    nixos::createdb(&dbfile, &versions).await?;
+    Ok(dbfile)
 }
+
 
 pub async fn unavailablepkgs() -> Result<HashMap<String, String>> {
     let nixpath = Command::new("nix")
@@ -286,23 +235,32 @@ pub async fn unavailablepkgs() -> Result<HashMap<String, String>> {
     let pool = SqlitePool::connect(&format!("sqlite://{}", nixospkgs)).await?;
 
     for pkg in flakespkgs.keys() {
-        let (x, broken, insecure): (String, u8, u8) =
-            sqlx::query_as("SELECT attribute,broken,insecure FROM meta WHERE attribute = $1")
+        // Packages from other flakes aren't in the nixpkgs catalog
+        if pkg.contains('#') {
+            continue;
+        }
+        let meta: Option<(u8, u8)> =
+            sqlx::query_as("SELECT broken,insecure FROM meta WHERE attribute = $1")
                 .bind(pkg)
-                .fetch_one(&pool)
+                .fetch_optional(&pool)
                 .await?;
-        if &x != pkg {
-            unavailable.insert(
-                pkg.to_string(),
-                String::from("Package not found in newer version of nixpkgs"),
-            );
-        } else if broken == 1 {
-            unavailable.insert(pkg.to_string(), String::from("Package is marked as broken"));
-        } else if insecure == 1 {
-            unavailable.insert(
-                pkg.to_string(),
-                String::from("Package is marked as insecure"),
-            );
+        match meta {
+            None => {
+                unavailable.insert(
+                    pkg.to_string(),
+                    String::from("Package not found in newer version of nixpkgs"),
+                );
+            }
+            Some((1, _)) => {
+                unavailable.insert(pkg.to_string(), String::from("Package is marked as broken"));
+            }
+            Some((_, 1)) => {
+                unavailable.insert(
+                    pkg.to_string(),
+                    String::from("Package is marked as insecure"),
+                );
+            }
+            _ => {}
         }
     }
     Ok(unavailable)
