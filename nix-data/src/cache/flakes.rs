@@ -5,7 +5,7 @@ use sqlx::SqlitePool;
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
-    io::{Read, Write},
+    io::Write,
     path::Path,
     process::Command,
 };
@@ -45,61 +45,24 @@ pub async fn flakespkgs() -> Result<String> {
         }
     }
 
-    // Get list of packages from flake
-    // Reuse the channel catalog when the system is on its release, else look the revision up
-    let catalog = match version.get("nixpkgsRevision") {
-        Some(rev) => nixos::catalogversions(rev).await,
-        None => None,
-    };
-    let pkgsout = if let Some(pkgs) = catalog {
-        pkgs
-    } else if let Some(rev) = version.get("nixpkgsRevision") {
-        let url = format!("https://raw.githubusercontent.com/snowflakelinux/nixpkgs-version-data/main/nixos-{}/{}.json.br", nixosversion.get(0..5).context("Invalid NixOS version")?, rev);
-        let resp = reqwest::get(&url).await?;
-        if resp.status().is_success() {
-            let r = resp.bytes().await?;
-            let mut br = brotli::Decompressor::new(r.as_ref(), 4096);
-            let mut pkgsout = Vec::new();
-            br.read_to_end(&mut pkgsout)?;
-            let pkgsjson: HashMap<String, String> = serde_json::from_slice(&pkgsout)?;
-            pkgsjson
-        } else {
-            let url = format!("https://raw.githubusercontent.com/snowflakelinux/nixpkgs-version-data/main/nixos-unstable/{}.json.br", rev);
-            let resp = reqwest::get(&url).await?;
-            if resp.status().is_success() {
-                let r = resp.bytes().await?;
-                let mut br = brotli::Decompressor::new(r.as_ref(), 4096);
-                let mut pkgsout = Vec::new();
-                br.read_to_end(&mut pkgsout)?;
-                let pkgsjson: HashMap<String, String> = serde_json::from_slice(&pkgsout)?;
-                pkgsjson
-            } else {
-                let pkgsout = Command::new("nix")
-                    .arg("search")
-                    .arg("--json")
-                    .arg(&format!("nixpkgs/{}", rev))
-                    .output()?;
-                let pkgsjson: HashMap<String, NixPkg> =
-                    serde_json::from_str(&String::from_utf8(pkgsout.stdout)?)?;
-                let pkgsjson = pkgsjson
-                    .iter()
-                    .map(|(k, v)| {
-                        (
-                            k.split('.').collect::<Vec<_>>()[2..].join("."),
-                            v.version.to_string(),
-                        )
-                    })
-                    .collect::<HashMap<String, String>>();
-                pkgsjson
-            }
+    // Get list of packages from flake: the channel catalog when the system is on its current release,
+    // else the system's own channel release, else a (slow) search of its nixpkgs revision
+    let rev = version.get("nixpkgsRevision");
+    let mut pkgsout = None;
+    if let Some(rev) = rev {
+        pkgsout = nixos::catalogversions(rev).await;
+        if pkgsout.is_none() {
+            pkgsout = nixos::releaseversions(nixosversion, rev).await;
         }
+    }
+    let pkgsout = if let Some(pkgs) = pkgsout {
+        pkgs
     } else {
         let pkgsout = Command::new("nix")
             .arg("search")
             .arg("--json")
-            // .arg("--inputs-from")
-            // .arg(&flakepath)
-            .arg("nixpkgs")
+            .arg(rev.map_or(String::from("nixpkgs"), |rev| format!("nixpkgs/{}", rev)))
+            .arg("^")
             .output()?;
         let pkgsjson: HashMap<String, NixPkg> =
             serde_json::from_str(&String::from_utf8(pkgsout.stdout)?)?;

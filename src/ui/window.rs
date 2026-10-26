@@ -1509,25 +1509,27 @@ FROM pkgs JOIN meta ON (pkgs.attribute = meta.attribute) WHERE pkgs.attribute = 
                                     if let Ok(currentpool) =
                                         &SqlitePool::connect(&format!("sqlite://{}", current)).await
                                     {
-                                        let (currver,): (String,) = sqlx::query_as(
+                                        // Missing when the package was added to the config but not rebuilt yet
+                                        let currver: sqlx::Result<(String,)> = sqlx::query_as(
                                             "SELECT version FROM pkgs WHERE attribute = $1",
                                         )
                                         .bind(installedpkg)
                                         .fetch_one(currentpool)
-                                        .await
-                                        .unwrap();
-                                        debug!("SYSTEM: {} {} {}", installedpkg, currver, version);
-                                        if version != currver {
-                                            updatesystemitems.push(UpdateItem {
-                                                name,
-                                                pname,
-                                                pkg: Some(installedpkg.clone()),
-                                                summary,
-                                                icon,
-                                                pkgtype: InstallType::System,
-                                                verfrom: Some(currver.clone()),
-                                                verto: Some(version.clone()),
-                                            })
+                                        .await;
+                                        if let Ok((currver,)) = currver {
+                                            debug!("SYSTEM: {} {} {}", installedpkg, currver, version);
+                                            if version != currver {
+                                                updatesystemitems.push(UpdateItem {
+                                                    name,
+                                                    pname,
+                                                    pkg: Some(installedpkg.clone()),
+                                                    summary,
+                                                    icon,
+                                                    pkgtype: InstallType::System,
+                                                    verfrom: Some(currver.clone()),
+                                                    verto: Some(version.clone()),
+                                                })
+                                            }
                                         }
                                     }
                                 }

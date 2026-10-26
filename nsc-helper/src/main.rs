@@ -239,6 +239,8 @@ fn flake(path: &str) -> Result<(), Box<dyn Error>> {
     let mut cmd = Command::new("nix")
         .arg("flake")
         .arg("update")
+        // Positional arguments are input names since Nix 2.19; the flake itself goes in --flake
+        .arg("--flake")
         .arg(path)
         .spawn()?;
     let x = cmd.wait()?;

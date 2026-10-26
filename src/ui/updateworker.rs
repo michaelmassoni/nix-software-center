@@ -247,6 +247,8 @@ async fn runcmd(
 ) -> Result<bool> {
     let systemconfig = config.systemconfig.unwrap_or_default();
     let flakeargs = if let Some(flake) = config.flake {
+        // Nix wants the flake's directory; Preferences stores the path to flake.nix itself
+        let flake = flake.strip_suffix("/flake.nix").unwrap_or(&flake).to_string();
         if let Some(flakearg) = config.flakearg {
             Some(format!("{}#{}", flake, flakearg))
         } else {

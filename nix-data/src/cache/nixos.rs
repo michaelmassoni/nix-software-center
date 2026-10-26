@@ -1,7 +1,7 @@
 use crate::CACHEDIR;
 use anyhow::{anyhow, Context, Result};
 use log::{debug, info};
-use serde::Deserialize;
+use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::{value::RawValue, Value};
 use sqlx::{
     migrate::MigrateDatabase,
@@ -58,6 +58,21 @@ struct ChannelMeta {
     platforms: Option<Box<RawValue>>,
 }
 
+/// Downloads a `packages.json.br` and parses it as `T`.
+/// Decompressed by hand so the ~400 MB of JSON is parsed as a stream instead of held in memory.
+async fn packagesjson<T: DeserializeOwned + Send + 'static>(url: &str) -> Result<T> {
+    let client = reqwest::Client::builder().brotli(false).build()?;
+    let resp = client.get(url).send().await?;
+    if !resp.status().is_success() {
+        return Err(anyhow!("Failed to download {}", url));
+    }
+    let bytes = resp.bytes().await?;
+    Ok(tokio::task::spawn_blocking(move || {
+        serde_json::from_reader(BufReader::new(brotli::Decompressor::new(bytes.as_ref(), 4096)))
+    })
+    .await??)
+}
+
 /// Builds `{name}.db` in the cache from the `packages.json` of the first of `channels` that exists on
 /// channels.nixos.org, and returns its path. Only rebuilt when the channel moves to a new release.
 pub(super) async fn channeldb(channels: &[&str], name: &str) -> Result<String> {
@@ -108,20 +123,11 @@ pub(super) async fn channeldb(channels: &[&str], name: &str) -> Result<String> {
     }
 
     debug!("Downloading {} packages.json", channel);
-    // Decompressed by hand so the ~400 MB of JSON is parsed as a stream instead of held in memory
-    let client = reqwest::Client::builder().brotli(false).build()?;
-    let resp = client
-        .get(format!("https://channels.nixos.org/{}/packages.json.br", channel))
-        .send()
-        .await?;
-    if !resp.status().is_success() {
-        return Err(anyhow!("Failed to download {} packages.json", channel));
-    }
-    let bytes = resp.bytes().await?;
-    let pkglist: ChannelPkgList = tokio::task::spawn_blocking(move || {
-        serde_json::from_reader(BufReader::new(brotli::Decompressor::new(bytes.as_ref(), 4096)))
-    })
-    .await??;
+    let pkglist: ChannelPkgList = packagesjson(&format!(
+        "https://channels.nixos.org/{}/packages.json.br",
+        channel
+    ))
+    .await?;
 
     debug!("Writing {} database", name);
     // Built beside the old database and swapped in, so a failed build never replaces a working one
@@ -251,6 +257,65 @@ pub(super) async fn catalogversions(rev: &str) -> Option<HashMap<String, String>
         .ok()?;
     debug!("Reusing {} package versions from nixospkgs.db", pkgs.len());
     Some(pkgs.into_iter().collect())
+}
+
+#[derive(Deserialize)]
+struct VersionList {
+    packages: HashMap<String, VersionPkg>,
+}
+
+#[derive(Deserialize)]
+struct VersionPkg {
+    version: Option<String>,
+}
+
+/// Returns the version of every package in the NixOS channel release built from nixpkgs revision `rev`,
+/// from that release's `packages.json` on releases.nixos.org.
+pub(super) async fn releaseversions(
+    nixosversion: &str,
+    rev: &str,
+) -> Option<HashMap<String, String>> {
+    let version = nixosversion.get(0..5)?;
+    let short = rev.get(0..12)?;
+    // Release directories end in the first 12 characters of their revision, e.g.
+    // nixos/unstable/nixos-26.11pre1100280.3ec636362e18/ or nixos/26.05/nixos-26.05.1234.abcdef123456/
+    for prefix in [
+        format!("nixos/unstable/nixos-{}pre", version),
+        format!("nixos/unstable-small/nixos-{}pre", version),
+        format!("nixos/{}/nixos-{}.", version, version),
+        format!("nixos/{}-small/nixos-{}.", version, version),
+    ] {
+        let listing = reqwest::get(format!(
+            "https://nix-releases.s3.amazonaws.com/?delimiter=/&prefix={}",
+            prefix
+        ))
+        .await
+        .ok()?
+        .text()
+        .await
+        .ok()?;
+        let suffix = format!(".{}/", short);
+        let release = listing
+            .split("<Prefix>")
+            .filter_map(|p| p.split("</Prefix>").next())
+            .find(|p| p.ends_with(&suffix));
+        if let Some(release) = release {
+            debug!("Reading package versions from {}", release);
+            let pkgs: VersionList = packagesjson(&format!(
+                "https://releases.nixos.org/{}packages.json.br",
+                release
+            ))
+            .await
+            .ok()?;
+            return Some(
+                pkgs.packages
+                    .into_iter()
+                    .filter_map(|(attr, pkg)| Some((attr, pkg.version?)))
+                    .collect(),
+            );
+        }
+    }
+    None
 }
 
 /// Downloads the latest 'options.json' for the system from the NixOS cache and returns the path to the file.
