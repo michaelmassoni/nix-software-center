@@ -7,130 +7,141 @@ Nix Software Center
 
 [![Built with Nix][builtwithnix badge]][builtwithnix]
 [![License: GPLv3][GPLv3 badge]][GPLv3]
-[![Chat on Matrix][matrix badge]][matrix]
-[![Chat on Discord][discord badge]][discord]
 
-A graphical app store for Nix built with [libadwaita](https://gitlab.gnome.org/GNOME/libadwaita), [GTK4](https://www.gtk.org/), and [Relm4](https://relm4.org/). Heavily inspired by [GNOME Software](https://gitlab.gnome.org/GNOME/gnome-software).
+A graphical app store for Nix, built with [GTK4](https://www.gtk.org/), [libadwaita](https://gitlab.gnome.org/GNOME/libadwaita) and [Relm4](https://relm4.org/), and inspired by [GNOME Software](https://gitlab.gnome.org/GNOME/gnome-software).
 
 <img src="data/screenshots/overview-light.png#gh-light-mode-only"/>
-<img src="data/screenshots/overview-dark.png#gh-dark-mode-only"/> 
+<img src="data/screenshots/overview-dark.png#gh-dark-mode-only"/>
 
 </div>
 
-# About this fork
-A maintained fork of [snowfallorg/nix-software-center](https://github.com/snowfallorg/nix-software-center), whose package list stopped updating in 2025.
+## About this fork
 
-- The package list is built from the `packages.json` that channels.nixos.org publishes for your channel, so it always matches current nixpkgs.
-- App icons, screenshots and descriptions come from [snowfallorg/nixos-appstream-data](https://github.com/snowfallorg/nixos-appstream-data). Apps it doesn't cover fall back to an icon from your icon theme.
+This is a maintained fork of [snowfallorg/nix-software-center](https://github.com/snowfallorg/nix-software-center). Upstream downloads its package list from a database that stopped updating in 2025, so packages added to nixpkgs since then don't appear in it.
 
-# Features
-- Install packages to `configuration.nix`
-  - Flakes support can be enabled in the preferences menu
-- Install packages with `nix profile` or `nix-env`
-- Show updates for all installed packages
-- Search for packages
-- Launch applications without installing via `nix-shell` and `nix run`
+Changes in this fork:
 
-## NixOS Flakes Installation
-`flake.nix`
+- **Current package list:** built from the `packages.json` that [channels.nixos.org](https://channels.nixos.org) publishes for your channel. It's rebuilt automatically when the channel moves to a new release.
+- **Newer app details:** icons, screenshots and descriptions come from [snowfallorg/nixos-appstream-data](https://github.com/snowfallorg/nixos-appstream-data), which covers about 1,500 apps. Packages it doesn't cover use a matching icon from your icon theme, if there is one.
+- **Bug fixes:** installed-version lookups no longer fail on current NixOS, which added a `specialisations` field to `nixos-version --json`.
+
+## Features
+
+- Browse and search nixpkgs by category
+- Install and remove packages in your `configuration.nix`, then rebuild the system. Flake-based systems are supported; set your flake path in Preferences.
+- Install packages for your user with `nix profile` or `nix-env`
+- See available updates for installed packages
+- Try an app without installing it, using `nix-shell` or `nix run`
+
+## Installation on NixOS
+
+Installing or removing system packages runs `nixos-rebuild` through `pkexec`. Recent NixOS releases no longer install a setuid `pkexec` by default, so enable it in your configuration:
+
+```nix
+security.polkit.enablePkexecWrapper = true;
+```
+
+### With flakes
+
+Add the input to `flake.nix`:
+
 ```nix
 {
   inputs = {
-    # other inputs
     nix-software-center.url = "github:michaelmassoni/nix-software-center";
-# rest of flake.nix
+    # ...
+  };
+}
 ```
 
-`configuration.nix`
-```
-environment.systemPackages = with pkgs; [
-    inputs.nix-software-center.packages.${system}.nix-software-center
-    # rest of your packages
-];
-```
+Pass `inputs` to your modules (for example with `specialArgs = { inherit inputs; };`), then add the package in `configuration.nix`:
 
-## NixOS Installation
-
-Head of `configuration.nix`
-
-if you are on unstable channel or any version after 22.11:
 ```nix
-{ config, pkgs, lib, ... }:
-let
-  nix-software-center = import (pkgs.fetchFromGitHub {
-    owner = "snowfallorg";
-    repo = "nix-software-center";
-    rev = "0.1.2";
-    sha256 = "xiqF1mP8wFubdsAQ1BmfjzCgOD3YZf7EGWl9i69FTls=";
-  }) {};
-in
-
-...
-
-environment.systemPackages =
-with pkgs; [
-  nix-software-center
-  # rest of your packages
+environment.systemPackages = [
+  inputs.nix-software-center.packages.${pkgs.stdenv.hostPlatform.system}.default
 ];
 ```
 
-For any other method of installation, when rebuilding you might be prompted to authenticate twice in a row by `pkexec`
+### Without flakes
 
-## 'nix profile' installation
+In `configuration.nix`:
+
+```nix
+{ config, pkgs, ... }:
+let
+  nix-software-center = import (builtins.fetchTarball
+    "https://github.com/michaelmassoni/nix-software-center/archive/main.tar.gz") {
+    inherit pkgs;
+    inherit (pkgs) lib;
+  };
+in
+{
+  environment.systemPackages = [ nix-software-center ];
+}
+```
+
+This always builds the latest `main`. To pin a version, replace `main` with a commit hash and add its `sha256`.
+
+## Other ways to run it
+
+Install for your user with `nix profile`:
+
 ```bash
 nix profile install github:michaelmassoni/nix-software-center
 ```
 
-## 'nix-env' Installation
+Install for your user with `nix-env`:
 
 ```bash
 git clone https://github.com/michaelmassoni/nix-software-center
 nix-env -f nix-software-center -i nix-software-center
 ```
 
-## Single run on an flakes enabled system:
+Run it once without installing:
+
 ```bash
 nix run github:michaelmassoni/nix-software-center
 ```
 
-## Single run on non-flakes enabled system:
-```bash
-nix --extra-experimental-features "nix-command flakes" run github:michaelmassoni/nix-software-center
-```
+If flakes aren't enabled on your system, add `--extra-experimental-features "nix-command flakes"` to the `nix run` command.
+
+## Known limitations
+
+- Update checks for packages installed with `nix profile` still use upstream's old version data.
+- Apps added to nixpkgs since February 2026 have no icons or screenshots until Snowfall regenerates its AppStream data.
 
 ## Debugging
 
 ```bash
-RUST_LOG=nix_software_center=trace nix-software-center
+RUST_LOG=nix_software_center=trace,nix_data=debug nix-software-center
 ```
 
 ## Screenshots
+
 <p align="middle">
   <img src="data/screenshots/frontpage-light.png#gh-light-mode-only"/>
-  <img src="data/screenshots/frontpage-dark.png#gh-dark-mode-only"/> 
+  <img src="data/screenshots/frontpage-dark.png#gh-dark-mode-only"/>
 </p>
 
 <p align="middle">
   <img src="data/screenshots/application-light.png#gh-light-mode-only"/>
-  <img src="data/screenshots/application-dark.png#gh-dark-mode-only"/> 
+  <img src="data/screenshots/application-dark.png#gh-dark-mode-only"/>
 </p>
 
 <p align="middle">
   <img src="data/screenshots/searchpage-light.png#gh-light-mode-only"/>
-  <img src="data/screenshots/searchpage-dark.png#gh-dark-mode-only"/> 
+  <img src="data/screenshots/searchpage-dark.png#gh-dark-mode-only"/>
 </p>
 
-## Licenses
+## License
 
-Some icons in [data/icons](data/icons/) contains assets from the [NixOS logo](https://github.com/NixOS/nixos-artwork/tree/master/logo) and are licensed under a [CC-BY license](https://creativecommons.org/licenses/by/4.0/).
+The code is licensed under the [GPLv3](LICENSE).
 
-Some icons in [data/icons](data/icons/) contains assets from [GNOME Software](https://gitlab.gnome.org/GNOME/gnome-software/-/tree/main/data/icons/hicolor/scalable) and are licensed under [CC0-1.0](https://creativecommons.org/publicdomain/zero/1.0/).
+Some icons in [data/icons](data/icons/) contain assets from the [NixOS logo](https://github.com/NixOS/nixos-artwork/tree/master/logo), licensed under [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/), and from [GNOME Software](https://gitlab.gnome.org/GNOME/gnome-software/-/tree/main/data/icons/hicolor/scalable), licensed under [CC0-1.0](https://creativecommons.org/publicdomain/zero/1.0/).
+
+App icons, screenshots and descriptions shown in the app come from [snowfallorg/nixos-appstream-data](https://github.com/snowfallorg/nixos-appstream-data) and keep the licenses stated in each app's metadata.
 
 [builtwithnix badge]: https://img.shields.io/badge/Built%20With-Nix-41439A?style=for-the-badge&logo=nixos&logoColor=white
 [builtwithnix]: https://builtwithnix.org/
 [GPLv3 badge]: https://img.shields.io/badge/License-GPLv3-blue.svg?style=for-the-badge
 [GPLv3]: https://opensource.org/licenses/GPL-3.0
-[matrix badge]: https://img.shields.io/badge/matrix-join%20chat-0cbc8c?style=for-the-badge&logo=matrix&logoColor=white
-[matrix]: https://matrix.to/#/#snowflakeos:matrix.org
-[discord badge]: https://img.shields.io/discord/1021080090676842506?color=7289da&label=Discord&logo=discord&logoColor=ffffff&style=for-the-badge
-[discord]: https://discord.gg/6rWNMmdkgT
