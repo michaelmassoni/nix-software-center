@@ -26,6 +26,7 @@ pub struct UpdatePageModel {
     #[tracker::no_eq]
     unavailabledialog: Controller<UnavailableDialogModel>,
     online: bool,
+    checking: bool,
 }
 
 #[derive(Debug)]
@@ -46,6 +47,8 @@ pub enum UpdatePageMsg {
     DoneWorking,
     FailedWorking,
     UpdateOnline(bool),
+    CheckForUpdates,
+    DoneChecking,
 }
 
 #[derive(Debug)]
@@ -206,6 +209,35 @@ impl SimpleComponent for UpdatePageModel {
                         gtk::Label {
                             add_css_class: "title-1",
                             set_label: "Everything is up to date!"
+                        },
+                        gtk::Button {
+                            add_css_class: "pill",
+                            set_halign: gtk::Align::Center,
+                            set_margin_top: 10,
+                            #[watch]
+                            set_visible: !model.checking,
+                            adw::ButtonContent {
+                                set_icon_name: "nsc-refresh-symbolic",
+                                set_label: "Check for Updates",
+                            },
+                            connect_clicked[sender] => move |_| {
+                                sender.input(UpdatePageMsg::CheckForUpdates);
+                            }
+                        },
+                        gtk::Box {
+                            set_orientation: gtk::Orientation::Vertical,
+                            set_margin_top: 10,
+                            set_spacing: 10,
+                            #[watch]
+                            set_visible: model.checking,
+                            #[name(checkprogress)]
+                            gtk::ProgressBar {
+                                set_pulse_step: 0.1,
+                            },
+                            gtk::Label {
+                                add_css_class: "dim-label",
+                                set_label: "Checking for updates…",
+                            }
                         }
                     }
                 }
@@ -240,6 +272,7 @@ impl SimpleComponent for UpdatePageModel {
             usertype: initparams.usertype,
             unavailabledialog,
             online: initparams.online,
+            checking: false,
             tracker: 0,
         };
 
@@ -249,6 +282,15 @@ impl SimpleComponent for UpdatePageModel {
         let widgets = view_output!();
         widgets.mainstack.set_hhomogeneous(false);
         widgets.mainstack.set_vhomogeneous(false);
+
+        // The check doesn't report progress, so keep the bar moving while it's on screen
+        let checkprogress = widgets.checkprogress.clone();
+        gtk::glib::timeout_add_local(std::time::Duration::from_millis(100), move || {
+            if checkprogress.is_mapped() {
+                checkprogress.pulse();
+            }
+            gtk::glib::Continue(true)
+        });
 
         ComponentParts { model, widgets }
     }
@@ -270,6 +312,7 @@ impl SimpleComponent for UpdatePageModel {
                 debug!("UPDATEUSERLIST: {:?}", updateuserlist);
                 debug!("UPDATESYSTEMLIST: {:?}", updatesystemlist);
                 self.update_updatetracker(|_| ());
+                self.set_checking(false);
                 let mut updateuserlist_guard = self.updateuserlist.guard();
                 updateuserlist_guard.clear();
                 for updateuser in updateuserlist {
@@ -425,6 +468,19 @@ impl SimpleComponent for UpdatePageModel {
             }
             UpdatePageMsg::UpdateOnline(online) => {
                 self.set_online(online);
+            }
+            UpdatePageMsg::CheckForUpdates => {
+                if !util::checkonline() {
+                    sender.output(AppMsg::CheckNetwork);
+                    self.online = false;
+                    return;
+                }
+                info!("UpdatePageMsg::CheckForUpdates");
+                self.set_checking(true);
+                sender.output(AppMsg::UpdateDB);
+            }
+            UpdatePageMsg::DoneChecking => {
+                self.set_checking(false);
             }
         }
     }

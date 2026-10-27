@@ -142,6 +142,8 @@ pub enum AppMsg {
     UpdateDefaultInstall(DefaultInstall),
     TryLoad,
     UpdateDB,
+    /// Package databases after `UpdateDB`: pkgdb (None if it failed), nixpkgsdb, systemdb
+    RefreshedDB(Option<String>, Option<String>, Option<String>),
     LoadConfig(NixDataConfig),
     Close,
     LoadError(String, String),
@@ -665,6 +667,17 @@ impl Component for AppModel {
                     self.syspkgtype.clone(),
                     self.userpkgtype.clone(),
                 ));
+            }
+            AppMsg::RefreshedDB(pkgdb, nixpkgsdb, systemdb) => {
+                info!("AppMsg::RefreshedDB");
+                if let Some(pkgdb) = pkgdb {
+                    self.pkgdb = pkgdb;
+                    self.nixpkgsdb = nixpkgsdb;
+                    self.systemdb = systemdb;
+                }
+                // Recompute updates against the new data, then pick up anything installed outside the app
+                sender.input(AppMsg::UpdateInstalledPage);
+                sender.input(AppMsg::UpdateInstalledPkgs);
             }
             AppMsg::LoadConfig(config) => {
                 info!("AppMsg::LoadConfig");
@@ -1610,6 +1623,7 @@ FROM pkgs JOIN meta ON (pkgs.attribute = meta.attribute) WHERE pkgs.attribute = 
                         .emit(UpdatePageMsg::Update(updateuseritems, updatesystemitems));
                 } else {
                     error!("Could not connect to pkgdb");
+                    self.updatepage.emit(UpdatePageMsg::DoneChecking);
                 }
             }
             AppMsg::UpdateCategoryPkgs => {

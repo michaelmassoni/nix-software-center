@@ -446,7 +446,7 @@ impl Worker for WindowAsyncHandler {
                 relm4::spawn(async move {
                     let nixos = Path::new("/etc/NIXOS").exists();
 
-                    let _pkgdb = if nixos {
+                    let pkgdb = if nixos {
                         match nix_data::cache::nixos::nixospkgs().await {
                             Ok(p) => p,
                             Err(e) => {
@@ -455,6 +455,7 @@ impl Worker for WindowAsyncHandler {
                                     String::from("Error retrieving NixOS package database"),
                                     e.to_string(),
                                 ));
+                                sender.output(AppMsg::RefreshedDB(None, None, None));
                                 return;
                             }
                         }
@@ -467,12 +468,13 @@ impl Worker for WindowAsyncHandler {
                                     String::from("Error retrieving nixpkgs package database"),
                                     e.to_string(),
                                 ));
+                                sender.output(AppMsg::RefreshedDB(None, None, None));
                                 return;
                             }
                         }
                     };
 
-                    let _nixpkgsdb = match userpkgs {
+                    let nixpkgsdb = match userpkgs {
                         UserPkgs::Profile => {
                             if let Ok(x) = nix_data::cache::profile::nixpkgslatest().await {
                                 Some(x)
@@ -483,7 +485,7 @@ impl Worker for WindowAsyncHandler {
                         UserPkgs::Env => None,
                     };
 
-                    let _systemdb = match syspkgs {
+                    let systemdb = match syspkgs {
                         SystemPkgs::None => None,
                         SystemPkgs::Legacy => {
                             if let Ok(x) = nix_data::cache::channel::legacypkgs().await {
@@ -500,6 +502,8 @@ impl Worker for WindowAsyncHandler {
                             }
                         }
                     };
+
+                    sender.output(AppMsg::RefreshedDB(Some(pkgdb), nixpkgsdb, systemdb));
                 });
             }
         }
