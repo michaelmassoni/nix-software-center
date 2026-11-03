@@ -23,6 +23,8 @@ pub struct NixDataConfig {
     pub generations: Option<u32>,
     /// Where packages that aren't installed yet are installed. If not set, they are installed for the user.
     pub defaultinstall: Option<DefaultInstall>,
+    /// Whether apps on Flathub are offered as Flatpaks next to the nixpkgs package. If not set, Flathub is off.
+    pub flatpak: Option<bool>,
 }
 
 

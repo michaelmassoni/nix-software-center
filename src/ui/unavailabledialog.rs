@@ -1,10 +1,8 @@
-use std::path::Path;
-
 use gtk::pango;
 use log::*;
 use relm4::{*, prelude::*, factory::*};
 use adw::prelude::*;
-use crate::{APPINFO, ui::{window::REBUILD_BROKER, rebuild::RebuildMsg}};
+use crate::ui::{window::REBUILD_BROKER, rebuild::RebuildMsg};
 
 use super::updatepage::{UpdatePageMsg, UpdateType};
 
@@ -184,29 +182,14 @@ impl FactoryComponent for UnavailableItemModel {
                         gtk::Image {
                             add_css_class: "icon-dropshadow",
                             set_halign: gtk::Align::Start,
-                            set_from_file: {
-                                if let Some(i) = &self.icon {
-                                    let iconpath = format!("{}/icons/nixos/128x128/{}", APPINFO, i);
-                                    let iconpath64 = format!("{}/icons/nixos/64x64/{}", APPINFO, i);
-                                    if Path::new(&iconpath).is_file() {
-                                        Some(iconpath)
-                                    } else if Path::new(&iconpath64).is_file() {
-                                        Some(iconpath64)
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                }
-                            },
+                            set_from_file: super::iconpath(&self.icon),
                             set_pixel_size: 64,
                         }
                     } else {
                         gtk::Image {
                             add_css_class: "icon-dropshadow",
                             set_halign: gtk::Align::Start,
-                            set_icon_name: Some(&super::themeicon(&self.pkg, &self.pname)),
-                            set_pixel_size: 64,
+                            set_size_request: (64, 64),
                         }
                     }
                 },

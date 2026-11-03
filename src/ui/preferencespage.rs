@@ -1,5 +1,6 @@
 use std::path::{PathBuf, Path};
 use super::window::AppMsg;
+use crate::parse::flathub;
 use adw::prelude::*;
 use nix_data::config::configfile::{DefaultInstall, NixDataConfig};
 use relm4::*;
@@ -12,6 +13,8 @@ pub struct PreferencesPageModel {
     flake: Option<PathBuf>,
     flakearg: Option<String>,
     defaultinstall: DefaultInstall,
+    flatpak: bool,
+    flatpakinstalled: bool,
     #[tracker::no_eq]
     open_dialog: Controller<OpenDialog>,
     #[tracker::no_eq]
@@ -27,6 +30,7 @@ pub enum PreferencesPageMsg {
     SetFlakePath(Option<PathBuf>),
     SetFlakeArg(Option<String>),
     SetDefaultInstall(DefaultInstall),
+    SetFlatpak(bool),
     ModifyFlake,
     Ignore,
 }
@@ -50,7 +54,7 @@ impl SimpleComponent for PreferencesPageModel {
                     set_visible: Path::new("/etc/NIXOS").exists(),
                     add = &adw::ComboRow {
                         set_title: "Default installation",
-                        set_subtitle: "Where packages that aren't installed yet are installed",
+                        set_subtitle: "Where apps from nixpkgs are installed, unless they already are",
                         set_model: Some(&gtk::StringList::new(&["User", "System"])),
                         connect_selected_notify[sender] => move |row| {
                             sender.input(PreferencesPageMsg::SetDefaultInstall(if row.selected() == 1 {
@@ -65,6 +69,28 @@ impl SimpleComponent for PreferencesPageModel {
                             DefaultInstall::User => 0,
                             DefaultInstall::System => 1,
                         },
+                    }
+                },
+
+                add = &adw::PreferencesGroup {
+                    add = &adw::ActionRow {
+                        set_title: "Flathub",
+                        set_subtitle: if model.flatpakinstalled {
+                            "Compare versions with Flathub and install apps as Flatpaks"
+                        } else {
+                            "Needs Flatpak. On NixOS, set services.flatpak.enable = true"
+                        },
+                        set_sensitive: model.flatpakinstalled,
+                        add_suffix = &gtk::Switch {
+                            set_valign: gtk::Align::Center,
+                            connect_state_set[sender] => move |_, b| {
+                                sender.input(PreferencesPageMsg::SetFlatpak(b));
+                                gtk::Inhibit(false)
+                            } @flatpakswitched,
+                            #[track(model.changed(PreferencesPageModel::flatpak()))]
+                            #[block_signal(flatpakswitched)]
+                            set_state: model.flatpak
+                        }
                     }
                 },
 
@@ -175,9 +201,9 @@ impl SimpleComponent for PreferencesPageModel {
                     add = &adw::EntryRow {
                         #[watch]
                         set_visible: model.flake.is_some(),
+                        // Before the title, which would otherwise be read as markup
+                        set_use_markup: false,
                         set_title: "Flake arguments (--flake path/to/flake.nix#<THIS ENTRY>)",
-                        set_use_markup: false,
-                        set_use_markup: false,
                         connect_changed[sender] => move |x| {
                             sender.input(PreferencesPageMsg::SetFlakeArg({
                                 let text = x.text().to_string();
@@ -221,6 +247,8 @@ impl SimpleComponent for PreferencesPageModel {
             flake: None,
             flakearg: None,
             defaultinstall: DefaultInstall::User,
+            flatpak: false,
+            flatpakinstalled: flathub::flatpakinstalled(),
             open_dialog,
             flake_file_dialog,
             tracker: 0,
@@ -239,6 +267,7 @@ impl SimpleComponent for PreferencesPageModel {
                 self.set_flake(config.flake.as_ref().map(PathBuf::from));
                 self.set_flakearg(config.flakearg);
                 self.set_defaultinstall(config.defaultinstall.unwrap_or(DefaultInstall::User));
+                self.set_flatpak(config.flatpak.unwrap_or(false));
             }
             PreferencesPageMsg::Open => self.open_dialog.emit(OpenDialogMsg::Open),
             PreferencesPageMsg::OpenFlake => self.flake_file_dialog.emit(OpenDialogMsg::Open),
@@ -257,6 +286,10 @@ impl SimpleComponent for PreferencesPageModel {
             PreferencesPageMsg::SetDefaultInstall(defaultinstall) => {
                 self.defaultinstall = defaultinstall;
                 sender.output(AppMsg::UpdateDefaultInstall(defaultinstall));
+            }
+            PreferencesPageMsg::SetFlatpak(flatpak) => {
+                self.flatpak = flatpak;
+                sender.output(AppMsg::UpdateFlatpak(flatpak));
             }
             PreferencesPageMsg::ModifyFlake => {
                 sender.output(AppMsg::UpdateFlake(self.flake.as_ref().map(|x| x.to_string_lossy().to_string()), self.flakearg.clone()));

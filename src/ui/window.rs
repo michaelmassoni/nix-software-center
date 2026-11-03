@@ -2,6 +2,7 @@ use crate::{
     config,
     parse::{
         config::{editconfig, getconfig},
+        flathub::{self, CatalogApp},
         packages::{AppData, LicenseEnum, PkgMaintainer, Platform},
         util,
     },
@@ -29,6 +30,7 @@ use std::{
     convert::identity,
     fs,
     path::Path,
+    sync::Arc,
 };
 
 use super::{
@@ -98,6 +100,13 @@ pub struct AppModel {
     #[tracker::no_eq]
     systemdb: Option<String>,
     appdata: HashMap<String, AppData>,
+    /// nixpkgs attribute for each AppStream ID (without ".desktop"), to match Flathub apps to nixpkgs
+    appstreamids: HashMap<String, String>,
+    /// The Flathub catalog, with each app's nixpkgs package worked out, when Flathub is on
+    flathubapps: Arc<Vec<CatalogApp>>,
+    /// Flathub app ID for each nixpkgs package that's also on Flathub
+    flathubbyattr: HashMap<String, String>,
+    flathubloading: bool,
     installeduserpkgs: HashMap<String, String>,
     installedsystempkgs: HashSet<String>,
     syspkgtype: SystemPkgs,
@@ -140,6 +149,7 @@ pub enum AppMsg {
     UpdateSysconfig(Option<String>),
     UpdateFlake(Option<String>, Option<String>),
     UpdateDefaultInstall(DefaultInstall),
+    UpdateFlatpak(bool),
     TryLoad,
     UpdateDB,
     /// Package databases after `UpdateDB`: pkgdb (None if it failed), nixpkgsdb, systemdb
@@ -195,6 +205,7 @@ pub enum AppAsyncMsg {
     UpdateInstalledPkgs(HashSet<String>, HashMap<String, String>),
     LoadCategory(PkgCategory, Vec<CategoryTile>, Vec<CategoryTile>),
     SetNetwork(bool),
+    FlathubCatalog(Vec<CatalogApp>),
 }
 
 #[relm4::component(pub)]
@@ -441,6 +452,7 @@ impl Component for AppModel {
                     flakearg: None,
                     generations: None,
                     defaultinstall: None,
+                    flatpak: None,
                 },
                 true,
             )
@@ -550,6 +562,10 @@ impl Component for AppModel {
             nixpkgsdb: None,
             systemdb: None,
             appdata: HashMap::new(),
+            appstreamids: HashMap::new(),
+            flathubapps: Arc::new(vec![]),
+            flathubbyattr: HashMap::new(),
+            flathubloading: false,
             installeduserpkgs: HashMap::new(),
             installedsystempkgs: HashSet::new(),
             syspkgtype,
@@ -740,6 +756,7 @@ impl Component for AppModel {
                     flakearg: self.config.flakearg.clone(),
                     generations: self.config.generations,
                     defaultinstall: self.config.defaultinstall,
+                    flatpak: self.config.flatpak,
                 };
                 if editconfig(self.config.clone()).is_err() {
                     warn!("Failed to update config");
@@ -780,6 +797,7 @@ impl Component for AppModel {
                     flakearg,
                     generations: self.config.generations,
                     defaultinstall: self.config.defaultinstall,
+                    flatpak: self.config.flatpak,
                 };
                 if editconfig(self.config.clone()).is_err() {
                     warn!("Failed to update config");
@@ -817,6 +835,15 @@ impl Component for AppModel {
                 }
                 self.pkgpage.emit(PkgMsg::UpdateConfig(self.config.clone()));
             }
+            AppMsg::UpdateFlatpak(flatpak) => {
+                self.config.flatpak = Some(flatpak);
+                if editconfig(self.config.clone()).is_err() {
+                    warn!("Failed to update config");
+                }
+                self.pkgpage.emit(PkgMsg::UpdateConfig(self.config.clone()));
+                sender.input(AppMsg::UpdateInstalledPage);
+                self.loadflathub(&sender);
+            }
             AppMsg::Initialize(
                 pkgdb,
                 nixpkgsdb,
@@ -830,9 +857,14 @@ impl Component for AppModel {
                 self.pkgdb = pkgdb;
                 self.nixpkgsdb = nixpkgsdb;
                 self.systemdb = systemdb;
+                self.appstreamids = appdata
+                    .iter()
+                    .map(|(attr, data)| (data.id.strip_suffix(".desktop").unwrap_or(&data.id).to_string(), attr.to_string()))
+                    .collect();
                 self.appdata = appdata;
                 self.categoryrec = categoryrec;
                 self.categoryall = categoryall;
+                self.loadflathub(&sender);
 
                 self.pkgpage.emit(PkgMsg::UpdateConfig(self.config.clone()));
                 self.updatepage
@@ -915,7 +947,9 @@ impl Component for AppModel {
             AppMsg::OpenPkg(pkg) => {
                 info!("AppMsg::OpenPkg {}", pkg);
                 sender.input(AppMsg::CheckNetwork);
-                if let Ok(pool) = &SqlitePool::connect(&format!("sqlite://{}", self.pkgdb)).await {
+                if let Some(id) = flathub::flathubid(&pkg) {
+                    self.openflathub(id, &sender).await;
+                } else if let Ok(pool) = &SqlitePool::connect(&format!("sqlite://{}", self.pkgdb)).await {
                     let pkgdata: Result<
                         (
                             String,
@@ -1178,6 +1212,7 @@ FROM pkgs JOIN meta ON (pkgs.attribute = meta.attribute) WHERE pkgs.attribute = 
                             }
                         }
 
+                        let flathubid = if self.config.flatpak == Some(true) { self.flathubbyattr.get(&pkg).cloned() } else { None };
                         let out = PkgInitModel {
                             name,
                             version: if version.is_empty() {
@@ -1202,6 +1237,8 @@ FROM pkgs JOIN meta ON (pkgs.attribute = meta.attribute) WHERE pkgs.attribute = 
                             installeduserpkgs: self.installeduserpkgs.keys().cloned().collect(),
                             installedsystempkgs: self.installedsystempkgs.clone(),
                             launchable,
+                            flathubid,
+                            flathubonly: false,
                         };
                         self.page = Page::PkgPage;
                         if self.viewstack.visible_child_name()
@@ -1615,9 +1652,29 @@ FROM pkgs JOIN meta ON (pkgs.attribute = meta.attribute) WHERE pkgs.attribute = 
 
                     installedsystemitems
                         .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+
+                    let mut installedflatpakitems = vec![];
+                    if self.config.flatpak == Some(true) {
+                        let flatpaks = tokio::task::spawn_blocking(flathub::installedflatpaks).await.unwrap_or_default();
+                        for (id, flatpak) in flatpaks {
+                            installedflatpakitems.push(InstalledItem {
+                                name: flatpak.name,
+                                pkg: Some(flathub::flathubkey(&id)),
+                                icon: flathub::installedicon(&id, &flatpak.installation),
+                                summary: None,
+                                pkgtype: InstallType::Flatpak,
+                                busy: self.installedpagebusy.contains(&(id.to_string(), InstallType::Flatpak)),
+                                pname: id,
+                            });
+                        }
+                        installedflatpakitems
+                            .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                    }
+
                     self.installedpage.emit(InstalledPageMsg::Update(
                         installeduseritems,
                         installedsystemitems,
+                        installedflatpakitems,
                     ));
                     self.updatepage
                         .emit(UpdatePageMsg::Update(updateuseritems, updatesystemitems));
@@ -1666,11 +1723,13 @@ FROM pkgs JOIN meta ON (pkgs.attribute = meta.attribute) WHERE pkgs.attribute = 
                 let userpkgtype = self.userpkgtype.clone();
                 let pkgdb = self.pkgdb.clone();
                 let appdata = self.appdata.clone();
+                let flathubapps = if self.config.flatpak == Some(true) { self.flathubapps.clone() } else { Arc::new(vec![]) };
                 sender.command(move |out, shutdown| {
                     let search = search.clone();
                     let installeduserpkgs = installeduserpkgs.clone();
                     let installedsystempkgs = installedsystempkgs;
                     let userpkgtype = userpkgtype.clone();
+                    let flathubapps = flathubapps.clone();
                     shutdown.register(async move {
                         let searchsplit: Vec<String> = search.split(' ').filter(|x| x.len() > 1).map(|x| x.to_string()).collect();
                         warn!("Searchsplit: {:?}", searchsplit);
@@ -1698,41 +1757,90 @@ FROM pkgs JOIN meta ON (pkgs.attribute = meta.attribute) WHERE pkgs.attribute = 
                             queryb.push("ORDER BY LENGTH(pkgs.attribute) ASC");
                             let q: Vec<(String, String, String, String)> =
                                 queryb.build_query_as().fetch_all(pkgpool).await.unwrap();
-                            let mut outpkgs = Vec::new();
-                            for (i, (attr, pname, desc, _version)) in q.into_iter().enumerate() {
+                            let nixitem = |attr: String, pname: String, desc: String| {
+                                let installeduser = match userpkgtype {
+                                    UserPkgs::Env => installeduserpkgs.contains_key(&pname),
+                                    UserPkgs::Profile => installeduserpkgs.contains_key(&attr)
+                                };
+                                let installedsystem = installedsystempkgs.contains(&attr);
+                                let summary = if desc.is_empty() { None } else { Some(desc) };
                                 if let Some(data) = appdata.get(&attr) {
-                                    outpkgs.push(SearchItem {
+                                    SearchItem {
                                         pkg: attr.to_string(),
-                                        pname: pname.to_string(),
+                                        pname,
                                         name: if let Some(name) = &data.name { name.get("C").unwrap_or(&attr).to_string() } else { attr.to_string() },
-                                        summary: if desc.is_empty() { None } else { Some(desc) },
+                                        summary,
                                         icon: data
                                             .icon
                                             .as_ref()
                                             .and_then(|x| x.cached.as_ref())
                                             .map(|x| x[0].name.clone()),
-                                        installeduser: match userpkgtype {
-                                          UserPkgs::Env => installeduserpkgs.contains_key(&pname),
-                                          UserPkgs::Profile => installeduserpkgs.contains_key(&attr)
-                                        },
-                                        installedsystem: installedsystempkgs.contains(&attr),
-                                    })
+                                        installeduser,
+                                        installedsystem,
+                                    }
                                 } else {
-                                    outpkgs.push(SearchItem {
-                                        pkg: attr.to_string(),
+                                    SearchItem {
+                                        pkg: attr,
                                         pname: pname.to_string(),
-                                        name: pname.to_string(),
-                                        summary: if desc.is_empty() { None } else { Some(desc) },
+                                        name: pname,
+                                        summary,
                                         icon: None,
-                                        installeduser: match userpkgtype {
-                                          UserPkgs::Env => installeduserpkgs.contains_key(&pname),
-                                          UserPkgs::Profile => installeduserpkgs.contains_key(&attr)
-                                        },
-                                        installedsystem: installedsystempkgs.contains(&attr),
-                                    });
+                                        installeduser,
+                                        installedsystem,
+                                    }
                                 }
+                            };
+                            let mut outpkgs = Vec::new();
+                            for (i, (attr, pname, desc, _version)) in q.into_iter().enumerate() {
+                                outpkgs.push(nixitem(attr, pname, desc));
                                 if i >= 200 {
                                     break;
+                                }
+                            }
+
+                            // Flathub apps: ones nixpkgs also has show as their nixpkgs package (added if the
+                            // search above missed it), the rest as Flathub apps
+                            let mut seen = outpkgs.iter().map(|x| x.pkg.to_string()).collect::<HashSet<_>>();
+                            let mut flathubonly = vec![];
+                            for app in flathub::searchcatalog(&flathubapps, &searchsplit, 20) {
+                                if let Some(attr) = &app.nixattr {
+                                    if seen.insert(attr.to_string()) {
+                                        let pkg: Result<(String, String), _> = sqlx::query_as(
+                                            "SELECT pkgs.pname, description FROM pkgs JOIN meta ON (pkgs.attribute = meta.attribute) WHERE pkgs.attribute = $1",
+                                        )
+                                        .bind(attr)
+                                        .fetch_one(pkgpool)
+                                        .await;
+                                        if let Ok((pname, desc)) = pkg {
+                                            outpkgs.push(nixitem(attr.to_string(), pname, desc));
+                                        }
+                                    }
+                                } else {
+                                    let app = app.clone();
+                                    flathubonly.push(tokio::spawn(async move {
+                                        // Icons are downloaded once; don't let a slow one hold up the results
+                                        let icon = match &app.icon {
+                                            Some(url) => tokio::time::timeout(std::time::Duration::from_secs(3), flathub::cacheicon(&app.id, url))
+                                                .await
+                                                .ok()
+                                                .flatten(),
+                                            None => None,
+                                        };
+                                        SearchItem {
+                                            pkg: flathub::flathubkey(&app.id),
+                                            pname: app.id,
+                                            name: app.name,
+                                            summary: app.summary,
+                                            icon,
+                                            installeduser: false,
+                                            installedsystem: false,
+                                        }
+                                    }));
+                                }
+                            }
+                            for item in flathubonly {
+                                if let Ok(item) = item.await {
+                                    outpkgs.push(item);
                                 }
                             }
                             outpkgs.sort_by(|a, b| {
@@ -1761,10 +1869,10 @@ FROM pkgs JOIN meta ON (pkgs.attribute = meta.attribute) WHERE pkgs.attribute = 
                                 //         bpoints -= 1;
                                 //     }
                                 // }
-                                if appdata.get(&a.pkg).is_some() {
+                                if appdata.contains_key(&a.pkg) || flathub::flathubid(&a.pkg).is_some() {
                                     apoints -= 5;
                                 }
-                                if appdata.get(&b.pkg).is_some() {
+                                if appdata.contains_key(&b.pkg) || flathub::flathubid(&b.pkg).is_some() {
                                     bpoints -= 5;
                                 }
                                 apoints.cmp(&bpoints)
@@ -1778,6 +1886,7 @@ FROM pkgs JOIN meta ON (pkgs.attribute = meta.attribute) WHERE pkgs.attribute = 
                 let p = match work.pkgtype {
                     InstallType::User => work.pname.to_string(),
                     InstallType::System => work.pkg.to_string(),
+                    InstallType::Flatpak => work.pname.to_string(),
                 };
                 self.installedpagebusy.push((p, work.pkgtype.clone()));
                 self.pkgpage.emit(PkgMsg::AddToQueue(work));
@@ -1786,6 +1895,7 @@ FROM pkgs JOIN meta ON (pkgs.attribute = meta.attribute) WHERE pkgs.attribute = 
                 let p = match work.pkgtype {
                     InstallType::User => work.pname.to_string(),
                     InstallType::System => work.pkg.to_string(),
+                    InstallType::Flatpak => work.pname.to_string(),
                 };
                 self.installedpagebusy
                     .retain(|(x, y)| x != &p && y != &work.pkgtype);
@@ -2124,6 +2234,19 @@ FROM pkgs JOIN meta ON (pkgs.attribute = meta.attribute) WHERE pkgs.attribute = 
                 self.updatepage.emit(UpdatePageMsg::UpdateOnline(online));
                 self.pkgpage.emit(PkgMsg::UpdateOnline(online));
             }
+            AppAsyncMsg::FlathubCatalog(mut apps) => {
+                info!("Loaded {} Flathub apps", apps.len());
+                self.flathubloading = false;
+                // When several apps match one package, the most installed wins
+                apps.sort_by(|a, b| b.installs.cmp(&a.installs));
+                self.flathubbyattr.clear();
+                for app in &apps {
+                    if let Some(attr) = &app.nixattr {
+                        self.flathubbyattr.entry(attr.to_string()).or_insert_with(|| app.id.to_string());
+                    }
+                }
+                self.flathubapps = Arc::new(apps);
+            }
         }
     }
 }
@@ -2131,3 +2254,113 @@ FROM pkgs JOIN meta ON (pkgs.attribute = meta.attribute) WHERE pkgs.attribute = 
 relm4::new_action_group!(MenuActionGroup, "menu");
 relm4::new_stateless_action!(AboutAction, MenuActionGroup, "about");
 relm4::new_stateless_action!(PreferencesAction, MenuActionGroup, "preferences");
+
+impl AppModel {
+    /// Loads the Flathub catalog in the background and works out which apps nixpkgs has too
+    fn loadflathub(&mut self, sender: &ComponentSender<Self>) {
+        if self.config.flatpak != Some(true) || self.flathubloading || !self.flathubapps.is_empty() || self.pkgdb.is_empty() {
+            return;
+        }
+        self.flathubloading = true;
+        let pkgdb = self.pkgdb.clone();
+        let appstreamids = self.appstreamids.clone();
+        sender.oneshot_command(async move {
+            let mut apps = flathub::catalog().await;
+            if let Ok(pool) = &SqlitePool::connect(&format!("sqlite://{}", pkgdb)).await {
+                let index = pnameindex(pool).await;
+                for app in apps.iter_mut() {
+                    app.nixattr = flathubtonix(&index, &appstreamids, &app.id, &app.name);
+                }
+            }
+            AppAsyncMsg::FlathubCatalog(apps)
+        });
+    }
+
+    /// Opens the page of an app that's only on Flathub, or its nixpkgs page if nixpkgs has it too
+    async fn openflathub(&mut self, id: &str, sender: &ComponentSender<Self>) {
+        if let Some(attr) = self.flathubapps.iter().find(|app| app.id == id).and_then(|app| app.nixattr.clone()) {
+            sender.input(AppMsg::OpenPkg(attr));
+            return;
+        }
+        let Some(details) = flathub::appdetails(id).await else {
+            warn!("Failed to get Flathub details for {}", id);
+            return;
+        };
+        let out = PkgInitModel {
+            name: details.name,
+            pkg: id.to_string(),
+            pname: id.to_string(),
+            summary: details.summary,
+            description: details.description,
+            version: details.version,
+            icon: details.icon,
+            screenshots: details.screenshots,
+            homepage: details.homepage,
+            licenses: details
+                .license
+                .map(|l| {
+                    let proprietary = l.starts_with("LicenseRef-proprietary");
+                    vec![pkgpage::License {
+                        free: Some(!proprietary),
+                        fullname: if proprietary { "Proprietary".to_string() } else { l.clone() },
+                        spdxid: if proprietary { None } else { Some(l) },
+                        url: None,
+                    }]
+                })
+                .unwrap_or_default(),
+            platforms: vec![],
+            maintainers: details
+                .developer
+                .map(|d| vec![PkgMaintainer { email: None, github: None, matrix: None, name: Some(d) }])
+                .unwrap_or_default(),
+            installeduserpkgs: HashSet::new(),
+            installedsystempkgs: HashSet::new(),
+            launchable: None,
+            flathubid: Some(id.to_string()),
+            flathubonly: true,
+        };
+        self.page = Page::PkgPage;
+        if self.viewstack.visible_child_name() != Some(gtk::glib::GString::from("search")) {
+            self.searching = false;
+        }
+        self.busy = false;
+        self.pkgpage.emit(PkgMsg::Open(Box::new(out)));
+    }
+}
+
+/// nixpkgs packages by normalized pname, with their homepages, shortest attribute first.
+/// Language package sets (python3Packages etc.) are left out, so apps don't match libraries.
+type PnameIndex = HashMap<String, Vec<(String, String)>>;
+
+async fn pnameindex(pool: &SqlitePool) -> PnameIndex {
+    let pkgs: Vec<(String, String, String)> = sqlx::query_as(
+        r#"
+SELECT pkgs.attribute, pname, homepage FROM pkgs JOIN meta ON (pkgs.attribute = meta.attribute)
+WHERE pkgs.attribute NOT LIKE '%.%' OR pkgs.attribute LIKE 'kdePackages.%' OR pkgs.attribute LIKE 'libsForQt5.%' OR pkgs.attribute LIKE 'gnome.%'
+    OR pkgs.attribute LIKE 'xfce.%' OR pkgs.attribute LIKE 'mate.%' OR pkgs.attribute LIKE 'cinnamon.%' OR pkgs.attribute LIKE 'pantheon.%'
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    let mut index = PnameIndex::new();
+    for (attr, pname, homepage) in pkgs {
+        index.entry(flathub::normalize(&pname)).or_default().push((attr, homepage));
+    }
+    for candidates in index.values_mut() {
+        candidates.sort_by_key(|(attr, _)| attr.len());
+    }
+    index
+}
+
+/// The nixpkgs package for a Flathub app: by AppStream ID, else a package named like the app whose
+/// homepage matches the app ID
+fn flathubtonix(index: &PnameIndex, appstreamids: &HashMap<String, String>, id: &str, name: &str) -> Option<String> {
+    if let Some(attr) = appstreamids.get(id) {
+        return Some(attr.to_string());
+    }
+    // The app's name first: the last part of its ID is often generic (com.spotify.Client)
+    flathub::normalizedids(id, name).iter().find_map(|n| {
+        index.get(n)?.iter().find(|(_, homepage)| flathub::sameproject(id, homepage)).map(|(attr, _)| attr.to_string())
+    })
+}

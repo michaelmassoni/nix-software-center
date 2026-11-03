@@ -1,10 +1,10 @@
-use crate::{APPINFO, ui::unavailabledialog::UnavailableDialogModel, parse::util};
+use crate::{ui::unavailabledialog::UnavailableDialogModel, parse::util};
 
 use super::{pkgpage::InstallType, window::*, updateworker::{UpdateAsyncHandler, UpdateAsyncHandlerMsg, UpdateAsyncHandlerInit}, rebuild::RebuildMsg, unavailabledialog::UnavailableDialogMsg};
 use adw::prelude::*;
 use nix_data::config::configfile::NixDataConfig;
 use relm4::{factory::*, gtk::pango, *};
-use std::{path::Path, convert::identity, collections::HashMap};
+use std::{convert::identity, collections::HashMap};
 use log::*;
 
 pub static UNAVAILABLE_BROKER: MessageBroker<UnavailableDialogMsg> = MessageBroker::new();
@@ -341,6 +341,8 @@ impl SimpleComponent for UpdatePageModel {
                         }
                     }
                 }
+                // Flatpaks aren't listed on this page
+                InstallType::Flatpak => {}
             },
             UpdatePageMsg::UpdateSystem => {
                 let online = util::checkonline();
@@ -535,29 +537,14 @@ impl FactoryComponent for UpdateItemModel {
                         gtk::Image {
                             add_css_class: "icon-dropshadow",
                             set_halign: gtk::Align::Start,
-                            set_from_file: {
-                                if let Some(i) = &self.item.icon {
-                                    let iconpath = format!("{}/icons/nixos/128x128/{}", APPINFO, i);
-                                    let iconpath64 = format!("{}/icons/nixos/64x64/{}", APPINFO, i);
-                                    if Path::new(&iconpath).is_file() {
-                                        Some(iconpath)
-                                    } else if Path::new(&iconpath64).is_file() {
-                                        Some(iconpath64)
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                }
-                            },
+                            set_from_file: super::iconpath(&self.item.icon),
                             set_pixel_size: 64,
                         }
                     } else {
                         gtk::Image {
                             add_css_class: "icon-dropshadow",
                             set_halign: gtk::Align::Start,
-                            set_icon_name: Some(&super::themeicon(self.item.pkg.as_deref().unwrap_or_default(), &self.item.pname)),
-                            set_pixel_size: 64,
+                            set_size_request: (64, 64),
                         }
                     }
                 },

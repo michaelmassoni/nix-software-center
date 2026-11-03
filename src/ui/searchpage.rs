@@ -1,5 +1,4 @@
-use std::{path::Path, collections::HashSet};
-use crate::APPINFO;
+use std::collections::HashSet;
 
 use super::window::*;
 use adw::prelude::*;
@@ -149,29 +148,14 @@ impl FactoryComponent for SearchItemModel {
                         gtk::Image {
                             add_css_class: "icon-dropshadow",
                             set_halign: gtk::Align::Start,
-                            set_from_file: {
-                                if let Some(i) = &self.item.icon {
-                                    let iconpath = format!("{}/icons/nixos/128x128/{}", APPINFO, i);
-                                    let iconpath64 = format!("{}/icons/nixos/64x64/{}", APPINFO, i);
-                                    if Path::new(&iconpath).is_file() {
-                                        Some(iconpath)
-                                    } else if Path::new(&iconpath64).is_file() {
-                                        Some(iconpath64)
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                }
-                            },
+                            set_from_file: super::iconpath(&self.item.icon),
                             set_pixel_size: 64,
                         }
                     } else {
                         gtk::Image {
                             add_css_class: "icon-dropshadow",
                             set_halign: gtk::Align::Start,
-                            set_icon_name: Some(&super::themeicon(&self.item.pkg, &self.item.pname)),
-                            set_pixel_size: 64,
+                            set_size_request: (64, 64),
                         }
                     }
                 },
@@ -215,7 +199,7 @@ impl FactoryComponent for SearchItemModel {
                             set_halign: gtk::Align::Start,
                             add_css_class: "dim-label",
                             add_css_class: "caption",
-                            set_label: self.item.pkg.as_str(),
+                            set_label: &super::pkglabel(&self.item.pkg),
                             set_ellipsize: pango::EllipsizeMode::End,
                             set_lines: 1,
                             set_wrap: true,

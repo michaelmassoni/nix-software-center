@@ -226,6 +226,7 @@ impl SimpleComponent for WelcomeModel {
                     flakearg: None,
                     generations: None,
                     defaultinstall: None,
+                    flatpak: None,
                 };
                 sender.output(AppMsg::LoadConfig(config));
                 self.hidden = true;

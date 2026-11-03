@@ -17,21 +17,26 @@ pub mod welcome;
 pub mod window;
 pub mod windowloading;
 
-use relm4::gtk;
+use std::path::Path;
+use crate::APPINFO;
 
-/// Icon name for a package without catalog data: an icon in the user's theme named after the package, else a generic one
-pub fn themeicon(pkg: &str, pname: &str) -> String {
-    let fallback = String::from("package-x-generic");
-    let Some(display) = gtk::gdk::Display::default() else {
-        return fallback;
-    };
-    let theme = gtk::IconTheme::for_display(&display);
-    // Attribute without its package set, e.g. kdePackages.kate -> kate
-    let attr = pkg.rsplit('.').next().unwrap_or_default();
-    [attr, pname]
-        .into_iter()
-        .filter(|n| !n.is_empty())
-        .map(str::to_lowercase)
-        .find(|n| theme.has_icon(n))
-        .unwrap_or(fallback)
+/// The package shown under an app's name: its nixpkgs attribute, or "Flathub · <app ID>"
+pub fn pkglabel(pkg: &str) -> String {
+    match crate::parse::flathub::flathubid(pkg) {
+        Some(id) => format!("Flathub · {}", id),
+        None => pkg.to_string(),
+    }
 }
+
+/// Icon file for an app: a cached Flathub icon (an absolute path) or an icon in the nixpkgs AppStream data
+pub fn iconpath(icon: &Option<String>) -> Option<String> {
+    let i = icon.as_ref()?;
+    if i.starts_with('/') {
+        return Path::new(i).is_file().then(|| i.to_string());
+    }
+    ["128x128", "64x64"]
+        .iter()
+        .map(|size| format!("{}/icons/nixos/{}/{}", APPINFO, size, i))
+        .find(|p| Path::new(p).is_file())
+}
+

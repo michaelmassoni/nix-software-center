@@ -25,6 +25,7 @@ Changes in this fork:
 - **Newer app details:** icons, screenshots and descriptions come from [snowfallorg/nixos-appstream-data](https://github.com/snowfallorg/nixos-appstream-data), which covers about 1,500 apps. Packages it doesn't cover use a matching icon from your icon theme, if there is one.
 - **Working updates:** the Updates page lists packages with newer versions, showing the installed and the available version. System packages update together with **Update**; `nix profile` and `nix-env` packages can also be updated one at a time.
 - **Current Nix support:** fixes for `nix profile` manifests, `nix profile upgrade`/`remove`, `nix flake update` and `nixos-version --json` on current Nix and NixOS.
+- **Flathub:** search also finds apps from Flathub, including ones nixpkgs doesn't have. Apps on both show the version in each and can be installed from either, and installed Flatpaks are listed on the Installed page. The Flathub app list is downloaded in the background and cached for a day, so searching it is instant. Off by default; turn it on in Preferences.
 
 ## Features
 
@@ -32,6 +33,7 @@ Changes in this fork:
 - Install and remove packages in your `configuration.nix`, then rebuild the system. Flake-based systems are supported; set your flake path in Preferences.
 - Install packages for your user with `nix profile` or `nix-env`
 - Choose in Preferences whether new packages install for your user or system-wide by default
+- Optionally install apps from Flathub as Flatpaks: turn on Flathub in Preferences. For apps on both, choose Nixpkgs or Flathub at the top of the app's page; Nixpkgs installs for your user or the system as set in Preferences
 - See and install updates for installed packages
 - Try an app without installing it, using `nix-shell` or `nix run`
 
@@ -41,6 +43,12 @@ Installing or removing system packages runs `nixos-rebuild` through `pkexec`. Re
 
 ```nix
 security.polkit.enablePkexecWrapper = true;
+```
+
+Flathub support needs Flatpak. Flatpaks are installed for your user, and the Flathub remote is added for your user if it's missing:
+
+```nix
+services.flatpak.enable = true;
 ```
 
 ### With flakes

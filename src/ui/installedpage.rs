@@ -1,6 +1,3 @@
-use std::path::Path;
-use crate::APPINFO;
-
 use super::{window::*, pkgpage::{InstallType, WorkPkg, PkgAction, NotifyPage}};
 use adw::prelude::*;
 use relm4::{factory::*, *, gtk::pango};
@@ -12,6 +9,8 @@ pub struct InstalledPageModel {
     installeduserlist: FactoryVecDeque<InstalledItemModel>,
     #[tracker::no_eq]
     installedsystemlist: FactoryVecDeque<InstalledItemModel>,
+    #[tracker::no_eq]
+    installedflatpaklist: FactoryVecDeque<InstalledItemModel>,
     userpkgtype: UserPkgs,
     systempkgtype: SystemPkgs,
     updatetracker: u8,
@@ -19,7 +18,7 @@ pub struct InstalledPageModel {
 
 #[derive(Debug)]
 pub enum InstalledPageMsg {
-    Update(Vec<InstalledItem>, Vec<InstalledItem>),
+    Update(Vec<InstalledItem>, Vec<InstalledItem>, Vec<InstalledItem>),
     UpdatePkgTypes(SystemPkgs, UserPkgs),
     OpenRow(usize, InstallType),
     Remove(InstalledItem),
@@ -86,6 +85,26 @@ impl SimpleComponent for InstalledPageModel {
                                 sender.input(InstalledPageMsg::OpenRow(i as usize, InstallType::System))
                             }
                         }
+                    },
+                    gtk::Label {
+                        #[watch]
+                        set_visible: !model.installedflatpaklist.is_empty(),
+                        set_halign: gtk::Align::Start,
+                        add_css_class: "title-4",
+                        set_label: "Flatpak (Flathub)",
+                    },
+                    #[local_ref]
+                    installedflatpaklist -> gtk::ListBox {
+                        #[watch]
+                        set_visible: !model.installedflatpaklist.is_empty(),
+                        set_valign: gtk::Align::Start,
+                        add_css_class: "boxed-list",
+                        set_selection_mode: gtk::SelectionMode::None,
+                        connect_row_activated[sender] => move |listbox, row| {
+                            if let Some(i) = listbox.index_of_child(row) {
+                                sender.input(InstalledPageMsg::OpenRow(i as usize, InstallType::Flatpak))
+                            }
+                        }
                     }
                 }
             }
@@ -100,6 +119,7 @@ impl SimpleComponent for InstalledPageModel {
         let model = InstalledPageModel {
             installeduserlist: FactoryVecDeque::new(gtk::ListBox::new(), sender.input_sender()),
             installedsystemlist: FactoryVecDeque::new(gtk::ListBox::new(), sender.input_sender()),
+            installedflatpaklist: FactoryVecDeque::new(gtk::ListBox::new(), sender.input_sender()),
             updatetracker: 0,
             userpkgtype,
             systempkgtype,
@@ -108,6 +128,7 @@ impl SimpleComponent for InstalledPageModel {
 
         let installeduserlist = model.installeduserlist.widget();
         let installedsystemlist = model.installedsystemlist.widget();
+        let installedflatpaklist = model.installedflatpaklist.widget();
 
         let widgets = view_output!();
 
@@ -117,7 +138,7 @@ impl SimpleComponent for InstalledPageModel {
     fn update(&mut self, msg: Self::Input, sender: ComponentSender<Self>) {
         self.reset();
         match msg {
-            InstalledPageMsg::Update(installeduserlist, installedsystemlist) => {
+            InstalledPageMsg::Update(installeduserlist, installedsystemlist, installedflatpaklist) => {
                 self.update_updatetracker(|_| ());
                 let mut installeduserlist_guard = self.installeduserlist.guard();
                 installeduserlist_guard.clear();
@@ -128,6 +149,11 @@ impl SimpleComponent for InstalledPageModel {
                 installedsystemlist_guard.clear();
                 for installedsystem in installedsystemlist {
                     installedsystemlist_guard.push_back(installedsystem);
+                }
+                let mut installedflatpaklist_guard = self.installedflatpaklist.guard();
+                installedflatpaklist_guard.clear();
+                for installedflatpak in installedflatpaklist {
+                    installedflatpaklist_guard.push_back(installedflatpak);
                 }
             }
             InstalledPageMsg::UpdatePkgTypes(systempkgtype, userpkgtype) => {
@@ -147,6 +173,14 @@ impl SimpleComponent for InstalledPageModel {
                     InstallType::System => {
                         let installedsystemlist_guard = self.installedsystemlist.guard();
                         if let Some(item) = installedsystemlist_guard.get(row) {
+                            if let Some(pkg) = &item.item.pkg {
+                                sender.output(AppMsg::OpenPkg(pkg.to_string()));
+                            }
+                        }
+                    }
+                    InstallType::Flatpak => {
+                        let installedflatpaklist_guard = self.installedflatpaklist.guard();
+                        if let Some(item) = installedflatpaklist_guard.get(row) {
                             if let Some(pkg) = &item.item.pkg {
                                 sender.output(AppMsg::OpenPkg(pkg.to_string()));
                             }
@@ -182,6 +216,16 @@ impl SimpleComponent for InstalledPageModel {
                         for i in 0..installedsystemlist_guard.len() {
                             if let Some(item) = installedsystemlist_guard.get_mut(i) {
                                 if item.item.pkg == Some(work.pkg.clone()) && item.item.pkgtype == work.pkgtype {
+                                    item.item.busy = false;
+                                }
+                            }
+                        }
+                    }
+                    InstallType::Flatpak => {
+                        let mut installedflatpaklist_guard = self.installedflatpaklist.guard();
+                        for i in 0..installedflatpaklist_guard.len() {
+                            if let Some(item) = installedflatpaklist_guard.get_mut(i) {
+                                if item.item.pname == work.pname && item.item.pkgtype == work.pkgtype {
                                     item.item.busy = false;
                                 }
                             }
@@ -248,29 +292,14 @@ impl FactoryComponent for InstalledItemModel {
                         gtk::Image {
                             add_css_class: "icon-dropshadow",
                             set_halign: gtk::Align::Start,
-                            set_from_file: {
-                                if let Some(i) = &self.item.icon {
-                                    let iconpath = format!("{}/icons/nixos/128x128/{}", APPINFO, i);
-                                    let iconpath64 = format!("{}/icons/nixos/64x64/{}", APPINFO, i);
-                                    if Path::new(&iconpath).is_file() {
-                                        Some(iconpath)
-                                    } else if Path::new(&iconpath64).is_file() {
-                                        Some(iconpath64)
-                                    } else {
-                                        None
-                                    }
-                                } else {
-                                    None
-                                }
-                            },
+                            set_from_file: super::iconpath(&self.item.icon),
                             set_pixel_size: 64,
                         }
                     } else {
                         gtk::Image {
                             add_css_class: "icon-dropshadow",
                             set_halign: gtk::Align::Start,
-                            set_icon_name: Some(&super::themeicon(self.item.pkg.as_deref().unwrap_or_default(), &self.item.pname)),
-                            set_pixel_size: 64,
+                            set_size_request: (64, 64),
                         }
                     }
                 },
@@ -292,7 +321,7 @@ impl FactoryComponent for InstalledItemModel {
                         set_halign: gtk::Align::Start,
                         add_css_class: "dim-label",
                         add_css_class: "caption",
-                        set_label: if let Some(p) = &self.item.pkg { p } else { &self.item.pname },
+                        set_label: &super::pkglabel(self.item.pkg.as_deref().unwrap_or(&self.item.pname)),
                         set_ellipsize: pango::EllipsizeMode::End,
                         set_lines: 1,
                         set_wrap: true,

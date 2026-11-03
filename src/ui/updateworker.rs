@@ -67,6 +67,7 @@ impl Worker for UpdateAsyncHandler {
                 flakearg: None,
                 generations: None,
                 defaultinstall: None,
+                flatpak: None,
             },
             syspkgs: params.syspkgs,
             userpkgs: params.userpkgs,

@@ -8,7 +8,8 @@ use relm4::actions::RelmActionGroup;
 use relm4::gtk::pango;
 use relm4::{factory::FactoryVecDeque, *};
 use sha256::digest;
-use std::collections::HashSet;
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 use std::convert::identity;
 use std::io::Cursor;
 use std::process::Command;
@@ -23,6 +24,7 @@ use std::{
 };
 use log::*;
 
+use crate::parse::flathub::{self, FlathubApp, InstalledFlatpak};
 use crate::parse::packages::PkgMaintainer;
 use crate::parse::util;
 use crate::ui::installworker::InstallAsyncHandlerMsg;
@@ -62,6 +64,11 @@ pub struct PkgModel {
     installtype: InstallType,
     installeduserpkgs: HashSet<String>,
     installedsystempkgs: HashSet<String>,
+    /// The matching Flathub app, when Flathub is on in Preferences
+    flathubonly: bool,
+    flathub: Option<FlathubApp>,
+    flathubloading: bool,
+    installedflatpaks: HashMap<String, InstalledFlatpak>,
 
     workqueue: HashSet<WorkPkg>,
     visible: bool,
@@ -71,6 +78,7 @@ pub struct PkgModel {
 #[derive(Debug, Hash, Eq, PartialEq, Clone)]
 pub struct WorkPkg {
     pub pkg: String,
+    /// For Flatpak work, the Flathub app ID
     pub pname: String,
     pub pkgtype: InstallType,
     pub action: PkgAction,
@@ -108,6 +116,7 @@ pub enum CarouselPage {
 pub enum InstallType {
     User,
     System,
+    Flatpak,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -135,6 +144,10 @@ pub struct PkgInitModel {
     pub platforms: Vec<String>,
     pub maintainers: Vec<PkgMaintainer>,
     pub launchable: Option<String>,
+    /// The matching Flathub app, if there is one and Flathub is on
+    pub flathubid: Option<String>,
+    /// An app that's only on Flathub: pkg and pname are its app ID
+    pub flathubonly: bool,
 }
 
 #[derive(Debug)]
@@ -151,6 +164,10 @@ pub enum PkgMsg {
     RemoveUser,
     InstallSystem,
     RemoveSystem,
+    InstallFlatpak,
+    RemoveFlatpak,
+    LaunchFlatpak,
+    SetFlathub(String, Option<FlathubApp>, HashMap<String, InstalledFlatpak>),
     Cancel,
     CancelFinished,
     FinishedProcess(WorkPkg),
@@ -159,6 +176,8 @@ pub enum PkgMsg {
     NixRun,
     NixShell,
     SetInstallType(InstallType),
+    /// Install from nixpkgs, for the user or the system as set in Preferences
+    UseNixpkgs,
     AddToQueue(WorkPkg),
     UpdateOnline(bool)
 }
@@ -167,6 +186,7 @@ pub enum PkgMsg {
 pub enum PkgAsyncMsg {
     LoadScreenshot(String, usize, String),
     SetError(String, usize),
+    SetFlathub(String, Option<FlathubApp>, HashMap<String, InstalledFlatpak>),
 }
 
 #[derive(Debug)]
@@ -206,30 +226,14 @@ impl Component for PkgModel {
                     set_label: &model.name
                 },
                 pack_end = &gtk::MenuButton {
+                    // Where to install from, when both have the app. Nixpkgs installs for the user or the
+                    // system as set in Preferences, or where the package is already installed.
                     #[watch]
-                    set_visible: model.syspkgtype != SystemPkgs::None,
-
+                    set_visible: model.flathub.is_some() && !model.flathubonly,
                     #[watch]
-                    set_label: match model.userpkgtype {
-                        UserPkgs::Env => {
-                            match model.installtype {
-                                InstallType::User => "User (nix-env)",
-                                InstallType::System => "System (configuration.nix)",
-                            }
-                        }
-                        UserPkgs::Profile => {
-                            match model.installtype {
-                                InstallType::User => "User (nix profile)",
-                                InstallType::System => "System (configuration.nix)",
-                            }
-                        }
-                    },
-                        
+                    set_label: if model.installtype == InstallType::Flatpak { "Flathub" } else { "Nixpkgs" },
                     #[wrap(Some)]
-                    set_popover = &gtk::PopoverMenu::from_model(Some(&match model.userpkgtype {
-                        UserPkgs::Env => installtype,
-                        UserPkgs::Profile => installprofiletype,
-                    })) {}
+                    set_popover = &gtk::PopoverMenu::from_model(Some(&sourcemenu)) {}
                 }
             },
             gtk::ScrolledWindow {
@@ -262,9 +266,7 @@ impl Component for PkgModel {
                                 gtk::Image {
                                     add_css_class: "icon-dropshadow",
                                     set_halign: gtk::Align::Start,
-                                    #[watch]
-                                    set_icon_name: Some(&super::themeicon(&model.pkg, &model.pname)),
-                                    set_pixel_size: 128,
+                                    set_size_request: (128, 128),
                                 }
                             },
                             gtk::FlowBox {
@@ -307,7 +309,20 @@ impl Component for PkgModel {
                                             set_wrap_mode: pango::WrapMode::WordChar,
                                             set_natural_wrap_mode: gtk::NaturalWrapMode::Word,
                                             #[watch]
-                                            set_label: &model.version.clone().unwrap_or_else(|| "Unknown".to_string()),
+                                            set_visible: !model.flathubonly,
+                                            #[watch]
+                                            set_label: &model.nixversionlabel(),
+                                        },
+                                        gtk::Label {
+                                            add_css_class: "dim-label",
+                                            set_halign: gtk::Align::Start,
+                                            set_wrap: true,
+                                            set_wrap_mode: pango::WrapMode::WordChar,
+                                            set_natural_wrap_mode: gtk::NaturalWrapMode::Word,
+                                            #[watch]
+                                            set_visible: model.flathub.is_some() || model.flathubloading,
+                                            #[watch]
+                                            set_label: &model.flathubversionlabel(),
                                         },
                                     },
                                 },
@@ -527,6 +542,91 @@ impl Component for PkgModel {
                                                             // set_visible: !model.installedsystempkgs.contains(&model.pname) && !model.installingsystempkgs.contains(&model.pkg),
                                                             #[wrap(Some)]
                                                             set_popover = &gtk::PopoverMenu::from_model(Some(&runaction)) {}
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            InstallType::Flatpak => {
+                                                gtk::Box {
+                                                    #[name(flatpakinstallstack)]
+                                                    if model.workqueue.iter().any(|x| x.pkg == model.pkg && x.pkgtype == InstallType::Flatpak) {
+                                                        gtk::Box {
+                                                            gtk::Spinner {
+                                                                set_halign: gtk::Align::End,
+                                                                #[watch]
+                                                                set_spinning: true,
+                                                                set_size_request: (32, 32),
+                                                                set_can_focus: false,
+                                                            },
+                                                            gtk::Button {
+                                                                set_halign: gtk::Align::End,
+                                                                set_valign: gtk::Align::Center,
+                                                                set_can_focus: false,
+                                                                set_width_request: 105,
+                                                                set_label: "Cancel",
+                                                                connect_clicked[sender] => move |_| {
+                                                                    sender.input(PkgMsg::Cancel)
+                                                                },
+                                                            }
+                                                        }
+                                                    } else if model.flatpakinstalled() {
+                                                        gtk::Box {
+                                                            set_halign: gtk::Align::End,
+                                                            set_valign: gtk::Align::Center,
+                                                            set_spacing: 10,
+                                                            gtk::Button {
+                                                                add_css_class: "suggested-action",
+                                                                set_halign: gtk::Align::End,
+                                                                set_valign: gtk::Align::Center,
+                                                                set_can_focus: false,
+                                                                set_width_request: 105,
+                                                                set_label: "Open",
+                                                                connect_clicked[sender] => move |_| {
+                                                                    sender.input(PkgMsg::LaunchFlatpak)
+                                                                }
+                                                            },
+                                                            gtk::Button {
+                                                                set_halign: gtk::Align::End,
+                                                                add_css_class: "destructive-action",
+                                                                set_icon_name: "user-trash-symbolic",
+                                                                set_can_focus: false,
+                                                                connect_clicked[sender] => move |_| {
+                                                                    sender.input(PkgMsg::RemoveFlatpak)
+                                                                }
+                                                            }
+                                                        }
+                                                    } else if !model.online {
+                                                        gtk::Box {
+                                                            set_orientation: gtk::Orientation::Horizontal,
+                                                            set_spacing: 10,
+                                                            set_halign: gtk::Align::End,
+                                                            gtk::Button {
+                                                                set_halign: gtk::Align::End,
+                                                                set_valign: gtk::Align::Center,
+                                                                add_css_class: "error",
+                                                                set_label: "Offline",
+                                                                set_can_target: false,
+                                                            },
+                                                            gtk::Button {
+                                                                set_halign: gtk::Align::End,
+                                                                set_valign: gtk::Align::Center,
+                                                                set_icon_name: "nsc-refresh-symbolic",
+                                                                connect_clicked[sender] => move |_| {
+                                                                    sender.output(AppMsg::CheckNetwork);
+                                                                }
+                                                            }
+                                                        }
+                                                    } else {
+                                                        gtk::Button {
+                                                            add_css_class: "suggested-action",
+                                                            set_halign: gtk::Align::End,
+                                                            set_valign: gtk::Align::Center,
+                                                            set_can_focus: false,
+                                                            set_label: "Install",
+                                                            set_width_request: 105,
+                                                            connect_clicked[sender] => move |_| {
+                                                                sender.input(PkgMsg::InstallFlatpak);
+                                                            },
                                                         }
                                                     }
                                                 }
@@ -928,7 +1028,7 @@ impl Component for PkgModel {
                                                     set_halign: gtk::Align::Center,
                                                     add_css_class: "heading",
                                                     #[watch]
-                                                    set_label: if model.maintainers.len() > 1 { "Maintainers" } else { "Maintainer" }
+                                                    set_label: if model.flathubonly { "Developer" } else if model.maintainers.len() > 1 { "Maintainers" } else { "Maintainer" }
                                                 },
                                                 gtk::Label {
                                                     set_halign: gtk::Align::Fill,
@@ -992,13 +1092,9 @@ impl Component for PkgModel {
     }
 
     menu! {
-        installtype: {
-            "User (nix-env)" => NixEnvAction,
-            "System (configuration.nix)" => NixSystemAction,
-        },
-        installprofiletype: {
-            "User (nix-profile)" => NixProfileAction,
-            "System (configuration.nix)" => NixSystemAction,
+        sourcemenu: {
+            "Nixpkgs" => NixpkgsAction,
+            "Flathub" => FlatpakAction,
         },
         runaction: {
             "Run without installing" => LaunchAction,
@@ -1035,6 +1131,10 @@ impl Component for PkgModel {
             maintainers: vec![],
             installeduserpkgs: HashSet::new(),
             installedsystempkgs: HashSet::new(),
+            flathubonly: false,
+            flathub: None,
+            flathubloading: false,
+            installedflatpaks: HashMap::new(),
             syspkgtype: initparams.syspkgs,
             userpkgtype: initparams.userpkgs,
             workqueue: HashSet::new(),
@@ -1056,32 +1156,25 @@ impl Component for PkgModel {
         let widgets = view_output!();
         widgets.userinstallstack.set_hhomogeneous(false);
         widgets.systeminstallstack.set_hhomogeneous(false);
+        widgets.flatpakinstallstack.set_hhomogeneous(false);
 
         let mut group = RelmActionGroup::<ModeActionGroup>::new();
-        let nixenv: RelmAction<NixEnvAction> = {
+        let nixpkgs: RelmAction<NixpkgsAction> = {
             let sender = sender.clone();
             RelmAction::new_stateless(move |_| {
-                sender.input(PkgMsg::SetInstallType(InstallType::User));
+                sender.input(PkgMsg::UseNixpkgs);
             })
         };
 
-        let nixprofile: RelmAction<NixProfileAction> = {
+        let flatpak: RelmAction<FlatpakAction> = {
             let sender = sender.clone();
             RelmAction::new_stateless(move |_| {
-                sender.input(PkgMsg::SetInstallType(InstallType::User));
+                sender.input(PkgMsg::SetInstallType(InstallType::Flatpak));
             })
         };
 
-        let nixsystem: RelmAction<NixSystemAction> = {
-            let sender = sender.clone();
-            RelmAction::new_stateless(move |_| {
-                sender.input(PkgMsg::SetInstallType(InstallType::System));
-            })
-        };
-
-        group.add_action(nixenv);
-        group.add_action(nixprofile);
-        group.add_action(nixsystem);
+        group.add_action(nixpkgs);
+        group.add_action(flatpak);
 
         let actions = group.into_action_group();
         widgets
@@ -1118,12 +1211,20 @@ impl Component for PkgModel {
         self.reset();
         match msg {
             PkgMsg::UpdateConfig(config) => {
+                if config.flatpak != Some(true) && !self.flathubonly {
+                    self.set_flathub(None);
+                    self.set_flathubloading(false);
+                    if self.installtype == InstallType::Flatpak {
+                        let installtype = self.nixinstalltype();
+                        self.set_installtype(installtype);
+                    }
+                }
                 self.config = config.clone();
                 self.installworker.emit(InstallAsyncHandlerMsg::SetConfig(config));
             }
             PkgMsg::UpdatePkgTypes(syspkgs, userpkgs) => {
-                self.syspkgtype = syspkgs.clone();
-                self.userpkgtype = userpkgs.clone();
+                self.set_syspkgtype(syspkgs.clone());
+                self.set_userpkgtype(userpkgs.clone());
                 self.installworker.emit(InstallAsyncHandlerMsg::SetPkgTypes(syspkgs, userpkgs));
             }
             PkgMsg::Open(pkgmodel) => {
@@ -1148,15 +1249,9 @@ impl Component for PkgModel {
                 self.set_installeduserpkgs(pkgmodel.installeduserpkgs);
                 self.set_installedsystempkgs(pkgmodel.installedsystempkgs);
 
-                // Installed packages open on where they're installed, others on the default from Preferences
-                let userinstalled = self.installeduserpkgs.contains(match self.userpkgtype { UserPkgs::Env => &self.pname, UserPkgs::Profile => &self.pkg });
-                let systeminstalled = self.installedsystempkgs.contains(&self.pkg);
-                let systemdefault = self.config.defaultinstall == Some(DefaultInstall::System) && self.syspkgtype != SystemPkgs::None;
-                if systeminstalled && !userinstalled || !userinstalled && !systeminstalled && systemdefault {
-                    self.set_installtype(InstallType::System)
-                } else {
-                    self.set_installtype(InstallType::User)
-                }
+                self.set_flathubonly(pkgmodel.flathubonly);
+                let installtype = if self.flathubonly { InstallType::Flatpak } else { self.nixinstalltype() };
+                self.set_installtype(installtype);
 
                 self.launchable = if let Some(l) = pkgmodel.launchable {
                     Some(Launch::GtkApp(l))
@@ -1173,6 +1268,20 @@ impl Component for PkgModel {
                 } else {
                     None
                 };
+
+                self.set_flathub(None);
+                self.set_flathubloading(false);
+                // The Flathub app is worked out with the catalog; only its current version is fetched here
+                if let (Some(id), true) = (pkgmodel.flathubid, self.online) {
+                    self.set_flathubloading(true);
+                    let pkg = self.pkg.clone();
+                    sender.oneshot_command(async move {
+                        let app = flathub::getapp(&id).await;
+                        let installed = tokio::task::spawn_blocking(flathub::installedflatpaks).await.unwrap_or_default();
+                        PkgAsyncMsg::SetFlathub(pkg, app, installed)
+                    });
+                }
+
                 self.summary = if let Some(s) = pkgmodel.summary {
                     let mut sum = s.trim().to_string();
                     while sum.contains('\n') {
@@ -1435,6 +1544,41 @@ impl Component for PkgModel {
                     self.installworker.emit(InstallAsyncHandlerMsg::Process(w));
                 }
             }
+            PkgMsg::InstallFlatpak => {
+                let online = util::checkonline();
+                if !online {
+                    sender.output(AppMsg::CheckNetwork);
+                    self.online = false;
+                    return;
+                }
+                if let Some(app) = &self.flathub {
+                    self.queueflatpak(app.id.to_string(), PkgAction::Install);
+                }
+            }
+            PkgMsg::RemoveFlatpak => {
+                if let Some(app) = &self.flathub {
+                    self.queueflatpak(app.id.to_string(), PkgAction::Remove);
+                }
+            }
+            PkgMsg::LaunchFlatpak => {
+                if let Some(app) = &self.flathub {
+                    let _ = Command::new("flatpak").arg("run").arg(&app.id).spawn();
+                }
+            }
+            PkgMsg::SetFlathub(pkg, app, installed) => {
+                if pkg != self.pkg || (self.config.flatpak != Some(true) && !self.flathubonly) {
+                    return;
+                }
+                self.set_flathubloading(false);
+                self.set_installedflatpaks(installed);
+                self.set_flathub(app);
+                // Open on Flathub if that's the only place it's installed
+                let userinstalled = self.installeduserpkgs.contains(match self.userpkgtype { UserPkgs::Env => &self.pname, UserPkgs::Profile => &self.pkg });
+                let systeminstalled = self.installedsystempkgs.contains(&self.pkg);
+                if self.flatpakinstalled() && !userinstalled && !systeminstalled {
+                    self.set_installtype(InstallType::Flatpak);
+                }
+            }
             PkgMsg::FinishedProcess(work) => {
                 let _ = nix_data::utils::refreshicons();
                 self.workqueue.remove(&work);
@@ -1479,6 +1623,11 @@ impl Component for PkgModel {
                                 self.installedsystempkgs.remove(&work.pkg);
                             }
                         }
+                    }
+                    InstallType::Flatpak => {
+                        self.set_installedflatpaks(flathub::installedflatpaks());
+                        // The Installed page only refreshes itself when nix packages change
+                        sender.output(AppMsg::UpdateInstalledPage);
                     }
                 }
                 sender.output(AppMsg::UpdateInstalledPkgs);
@@ -1621,6 +1770,10 @@ impl Component for PkgModel {
             PkgMsg::SetInstallType(t) => {
                 self.set_installtype(t);
             }
+            PkgMsg::UseNixpkgs => {
+                let installtype = self.nixinstalltype();
+                self.set_installtype(installtype);
+            }
             PkgMsg::AddToQueue(work) => {
                 self.workqueue.insert(work.clone());
                 if self.workqueue.len() == 1 {
@@ -1641,6 +1794,69 @@ impl Component for PkgModel {
             PkgAsyncMsg::SetError(pkg, i) => {
                 sender.input(PkgMsg::SetError(pkg, i));
             }
+            PkgAsyncMsg::SetFlathub(pkg, app, installed) => {
+                sender.input(PkgMsg::SetFlathub(pkg, app, installed));
+            }
+        }
+    }
+}
+
+impl PkgModel {
+    /// Where a nixpkgs install goes: where the package is installed, else the default from Preferences
+    fn nixinstalltype(&self) -> InstallType {
+        let userinstalled = self.installeduserpkgs.contains(match self.userpkgtype { UserPkgs::Env => &self.pname, UserPkgs::Profile => &self.pkg });
+        let systeminstalled = self.installedsystempkgs.contains(&self.pkg);
+        let systemdefault = self.config.defaultinstall == Some(DefaultInstall::System) && self.syspkgtype != SystemPkgs::None;
+        if systeminstalled && !userinstalled || !userinstalled && !systeminstalled && systemdefault {
+            InstallType::System
+        } else {
+            InstallType::User
+        }
+    }
+
+    fn flatpakinstalled(&self) -> bool {
+        self.flathub.as_ref().map_or(false, |app| self.installedflatpaks.contains_key(&app.id))
+    }
+
+    /// Which repository has the newer version: Less means Flathub is newer
+    fn comparerepos(&self) -> Option<Ordering> {
+        flathub::compareversions(self.version.as_ref()?, self.flathub.as_ref()?.version.as_ref()?)
+    }
+
+    fn nixversionlabel(&self) -> String {
+        let version = self.version.clone().unwrap_or_else(|| "Unknown".to_string());
+        if self.flathub.is_none() {
+            return version;
+        }
+        match self.comparerepos() {
+            Some(Ordering::Greater) => format!("nixpkgs: {} (newer)", version),
+            _ => format!("nixpkgs: {}", version),
+        }
+    }
+
+    fn flathubversionlabel(&self) -> String {
+        let Some(app) = &self.flathub else {
+            return "Checking Flathub…".to_string();
+        };
+        let version = app.version.clone().unwrap_or_else(|| "Unknown".to_string());
+        match self.comparerepos() {
+            Some(Ordering::Less) => format!("Flathub: {} (newer)", version),
+            _ => format!("Flathub: {}", version),
+        }
+    }
+
+    fn queueflatpak(&mut self, appid: String, action: PkgAction) {
+        let w = WorkPkg {
+            pkg: self.pkg.to_string(),
+            pname: appid,
+            pkgtype: InstallType::Flatpak,
+            action,
+            block: false,
+            notify: None,
+        };
+        self.workqueue.insert(w.clone());
+        if self.workqueue.len() == 1 {
+            self.installworker.emit(InstallAsyncHandlerMsg::Process(w));
         }
     }
 }
@@ -1650,9 +1866,8 @@ fn launchterm(cmd: &str) {
 }
 
 relm4::new_action_group!(ModeActionGroup, "mode");
-relm4::new_stateless_action!(NixEnvAction, ModeActionGroup, "env");
-relm4::new_stateless_action!(NixProfileAction, ModeActionGroup, "profile");
-relm4::new_stateless_action!(NixSystemAction, ModeActionGroup, "system");
+relm4::new_stateless_action!(NixpkgsAction, ModeActionGroup, "nixpkgs");
+relm4::new_stateless_action!(FlatpakAction, ModeActionGroup, "flatpak");
 
 relm4::new_action_group!(RunActionGroup, "run");
 relm4::new_stateless_action!(LaunchAction, RunActionGroup, "launch");

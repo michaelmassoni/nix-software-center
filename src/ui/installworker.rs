@@ -1,6 +1,7 @@
 use super::pkgpage::{InstallType, PkgAction, PkgMsg, WorkPkg};
 use super::rebuild::RebuildMsg;
 use super::window::{SystemPkgs, UserPkgs, REBUILD_BROKER};
+use crate::parse::flathub::FLATHUB_REPO;
 use log::*;
 use nix_data::config::configfile::NixDataConfig;
 use relm4::*;
@@ -52,6 +53,7 @@ impl Worker for InstallAsyncHandler {
                 flakearg: None,
                 generations: None,
                 defaultinstall: None,
+                flatpak: None,
             },
             pid: None,
             syspkgs: params.syspkgs,
@@ -257,6 +259,25 @@ impl Worker for InstallAsyncHandler {
                             }
                         }
                     },
+                    InstallType::Flatpak => {
+                        // For Flatpak work, pname is the Flathub app ID
+                        info!("{:?} Flatpak: {}", work.action, work.pname);
+                        self.process = Some(relm4::spawn(async move {
+                            let success = match work.action {
+                                PkgAction::Install => {
+                                    runflatpak(&["remote-add", "--user", "--if-not-exists", "flathub", FLATHUB_REPO]).await
+                                        && runflatpak(&["install", "--user", "--noninteractive", "-y", "flathub", &work.pname]).await
+                                }
+                                // No --user/--system: removes it from whichever installation has it
+                                PkgAction::Remove => runflatpak(&["uninstall", "--noninteractive", "-y", &work.pname]).await,
+                            };
+                            if success {
+                                sender.output(PkgMsg::FinishedProcess(work));
+                            } else {
+                                sender.output(PkgMsg::FailedProcess(work));
+                            }
+                        }));
+                    }
                     InstallType::System => {
                         REBUILD_BROKER.send(RebuildMsg::Show);
                         if let Some(systemconfig) = &config.systemconfig {
@@ -332,6 +353,27 @@ impl Worker for InstallAsyncHandler {
                 sender.output(PkgMsg::CancelFinished);
             }
             InstallAsyncHandlerMsg::SetPid(p) => self.pid = p,
+        }
+    }
+}
+
+async fn runflatpak(args: &[&str]) -> bool {
+    let p = tokio::process::Command::new("flatpak")
+        .args(args)
+        .kill_on_drop(true)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await;
+    match p {
+        Ok(o) if o.status.success() => true,
+        Ok(o) => {
+            warn!("flatpak {} failed: {}", args.join(" "), String::from_utf8_lossy(&o.stderr).trim());
+            false
+        }
+        Err(e) => {
+            warn!("Error running flatpak: {}", e);
+            false
         }
     }
 }
