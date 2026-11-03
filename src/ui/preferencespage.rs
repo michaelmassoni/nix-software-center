@@ -50,12 +50,13 @@ impl SimpleComponent for PreferencesPageModel {
             set_search_enabled: false,
             add = &adw::PreferencesPage {
                 add = &adw::PreferencesGroup {
+                    set_title: "Packages",
                     // Installing to the system needs a NixOS configuration
                     set_visible: Path::new("/etc/NIXOS").exists(),
                     add = &adw::ComboRow {
-                        set_title: "Default installation",
-                        set_subtitle: "Where apps from nixpkgs are installed, unless they already are",
-                        set_model: Some(&gtk::StringList::new(&["User", "System"])),
+                        set_title: "Install packages",
+                        set_subtitle: "Applies to packages from nixpkgs that aren't installed yet",
+                        set_model: Some(&gtk::StringList::new(&["For this user", "System-wide"])),
                         connect_selected_notify[sender] => move |row| {
                             sender.input(PreferencesPageMsg::SetDefaultInstall(if row.selected() == 1 {
                                 DefaultInstall::System
@@ -73,14 +74,17 @@ impl SimpleComponent for PreferencesPageModel {
                 },
 
                 add = &adw::PreferencesGroup {
+                    set_title: "Flathub",
+                    #[name(flatpakrow)]
                     add = &adw::ActionRow {
-                        set_title: "Flathub",
+                        set_title: "Show apps from Flathub",
                         set_subtitle: if model.flatpakinstalled {
-                            "Compare versions with Flathub and install apps as Flatpaks"
+                            "Find apps on Flathub too, and install them as Flatpaks"
                         } else {
-                            "Needs Flatpak. On NixOS, set services.flatpak.enable = true"
+                            "Requires Flatpak (services.flatpak.enable on NixOS)"
                         },
                         set_sensitive: model.flatpakinstalled,
+                        #[name(flatpakswitch)]
                         add_suffix = &gtk::Switch {
                             set_valign: gtk::Align::Center,
                             connect_state_set[sender] => move |_, b| {
@@ -95,7 +99,7 @@ impl SimpleComponent for PreferencesPageModel {
                 },
 
                 add = &adw::PreferencesGroup {
-                    // set_title: "Preferences",
+                    set_title: "System configuration",
                     set_visible: Path::new("/etc/NIXOS").exists(),
                     add = &adw::ActionRow {
                         set_title: "Configuration file",
@@ -114,9 +118,9 @@ impl SimpleComponent for PreferencesPageModel {
                                     gtk::Label {
                                         #[watch]
                                         set_label: {
-                                            let x = if let Some(configpath)  = &model.configpath { configpath.file_name().unwrap_or_default().to_str().unwrap_or_default() } else { "(None)" };
+                                            let x = if let Some(configpath)  = &model.configpath { configpath.file_name().unwrap_or_default().to_str().unwrap_or_default() } else { "Not set" };
                                             if x.is_empty() {
-                                                "(None)"
+                                                "Not set"
                                             } else {
                                                 x
                                             }
@@ -129,14 +133,18 @@ impl SimpleComponent for PreferencesPageModel {
                             },
                             gtk::Button {
                                 set_icon_name: "user-trash-symbolic",
+                                set_tooltip_text: Some("Clear"),
                                 connect_clicked[sender] => move |_| {
                                     sender.input(PreferencesPageMsg::SetConfigPath(None));
                                 }
                             }
                         }
                     },
+                    #[name(flakerow)]
                     add = &adw::ActionRow {
-                        set_title: "Use nix flakes",
+                        set_title: "Use flakes",
+                        set_subtitle: "Rebuild the system from a flake",
+                        #[name(flakeswitch)]
                         add_suffix = &gtk::Switch {
                             set_valign: gtk::Align::Center,
                             connect_state_set[sender] => move |_, b| {
@@ -178,7 +186,7 @@ impl SimpleComponent for PreferencesPageModel {
                                                 ""
                                             };
                                             if x.is_empty() {
-                                                "(None)"
+                                                "Not set"
                                             } else {
                                                 x
                                             }
@@ -201,9 +209,8 @@ impl SimpleComponent for PreferencesPageModel {
                     add = &adw::EntryRow {
                         #[watch]
                         set_visible: model.flake.is_some(),
-                        // Before the title, which would otherwise be read as markup
-                        set_use_markup: false,
-                        set_title: "Flake arguments (--flake path/to/flake.nix#<THIS ENTRY>)",
+                        set_title: "Configuration name",
+                        set_tooltip_text: Some("The flake's nixosConfigurations entry to build. Leave empty to use this computer's hostname."),
                         connect_changed[sender] => move |x| {
                             sender.input(PreferencesPageMsg::SetFlakeArg({
                                 let text = x.text().to_string();
@@ -255,6 +262,9 @@ impl SimpleComponent for PreferencesPageModel {
         };
 
         let widgets = view_output!();
+        // Clicking anywhere on a switch row toggles it
+        widgets.flatpakrow.set_activatable_widget(Some(&widgets.flatpakswitch));
+        widgets.flakerow.set_activatable_widget(Some(&widgets.flakeswitch));
 
         ComponentParts { model, widgets }
     }
